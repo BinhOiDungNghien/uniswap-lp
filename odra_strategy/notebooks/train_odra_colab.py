@@ -1,5 +1,5 @@
 # %% [markdown]
-# # ODRA Strategy Training on Google Colab
+# # ODRA Strategy Training on Kaggle
 # 
 # This notebook implements the Optimal Dynamic Reset Allocation (ODRA) strategy training using Uniswap v3 tick-level data.
 
@@ -7,37 +7,8 @@
 # ## Setup Environment and Dependencies
 
 # %%
-# Mount Google Drive
-from google.colab import drive
-drive.mount('/content/drive')
-
-# %%
-# Clone repository and install dependencies
 import os
-os.system('git clone https://github.com/YOUR_USERNAME/uniswap-lp.git')
-os.chdir('uniswap-lp')
-os.system('pip install -r requirements.txt')
-
-# %%
-# Copy data from Drive to local
-os.system('mkdir -p odra_strategy/data/raw')
-os.system('cp /content/drive/MyDrive/uniswap_data/*.tick.csv odra_strategy/data/raw/')
-
-# %% [markdown]
-# ## Check GPU Availability
-
-# %%
-# Set up GPU
-import torch
-print(f"CUDA available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
-    
-# %% [markdown]
-# ## Import Dependencies and Setup
-
-# %%
-# Import necessary modules
+import sys
 import yaml
 import logging
 from pathlib import Path
@@ -45,6 +16,52 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+# %%
+# Setup paths
+KAGGLE_BASE = '/kaggle/working/uniswap-lp'
+os.chdir(KAGGLE_BASE)
+sys.path.append(KAGGLE_BASE)
+
+# Create necessary directories
+for dir_path in [
+    'odra_strategy/data/raw',
+    'odra_strategy/data/processed',
+    'odra_strategy/outputs/logs',
+    'odra_strategy/outputs/models',
+    'odra_strategy/outputs/plots'
+]:
+    Path(dir_path).mkdir(parents=True, exist_ok=True)
+
+# %% [markdown]
+# ## Upload Data
+# 
+# Before running this cell, make sure to:
+# 1. Click "Add data" in Kaggle notebook
+# 2. Upload your tick data files (*.tick.csv)
+# 3. Set the dataset path in TICK_DATA_PATH
+
+# %%
+# Set path to your uploaded tick data
+TICK_DATA_PATH = '/kaggle/input/your-dataset-name/*.tick.csv'  # Update this path
+
+# Copy tick data to raw directory
+import glob
+import shutil
+
+tick_files = glob.glob(TICK_DATA_PATH)
+if not tick_files:
+    raise FileNotFoundError(f"No tick data files found in {TICK_DATA_PATH}")
+
+print(f"Found {len(tick_files)} tick data files")
+for file in tick_files:
+    shutil.copy(file, 'odra_strategy/data/raw/')
+print("Data files copied to raw directory")
+
+# %% [markdown]
+# ## Import Dependencies and Setup
+
+# %%
+# Import project modules
 from odra_strategy.data.data_loader import DataLoader
 from odra_strategy.features.feature_engine import FeatureEngine
 from odra_strategy.strategy.strategy_simulator import StrategySimulator
@@ -53,9 +70,16 @@ from odra_strategy.model.trainer import ODRATrainer
 from odra_strategy.utils.logging_utils import setup_logging
 
 # %%
-# Load configuration
+# Load and adjust configuration
 with open('odra_strategy/config/odra_config.yml', 'r') as f:
     config = yaml.safe_load(f)
+
+# Update paths for Kaggle environment
+config['data']['raw_path'] = os.path.join(KAGGLE_BASE, 'odra_strategy/data/raw')
+config['data']['processed_path'] = os.path.join(KAGGLE_BASE, 'odra_strategy/data/processed/odra_dataset.pkl')
+config['logging']['log_dir'] = os.path.join(KAGGLE_BASE, 'odra_strategy/outputs/logs')
+config['logging']['model_dir'] = os.path.join(KAGGLE_BASE, 'odra_strategy/outputs/models')
+config['logging']['plot_dir'] = os.path.join(KAGGLE_BASE, 'odra_strategy/outputs/plots')
 
 # Setup logging
 setup_logging(config['logging']['log_dir'])
