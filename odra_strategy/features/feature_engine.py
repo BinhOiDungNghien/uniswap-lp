@@ -7,6 +7,7 @@ import numpy as np
 from typing import Dict, Any
 import logging
 from pathlib import Path
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +90,11 @@ class FeatureEngine:
             ewma.loc[first_idx] = abs(float(swap_df.loc[first_idx, 'amount0']))
             last_value = ewma.loc[first_idx]
             
-            # Process remaining SWAPs
-            for idx in swap_df.index[1:]:
+            # Process remaining SWAPs with progress bar
+            for idx in tqdm(swap_df.index[1:], 
+                          desc="Processing SWAPS", 
+                          leave=False,
+                          position=1):
                 if self.is_non_arbitrage_swap(df, df.index.get_loc(idx)):
                     volume = abs(float(swap_df.loc[idx, 'amount0']))
                     last_value = self.alpha * volume + (1 - self.alpha) * last_value
@@ -109,7 +113,11 @@ class FeatureEngine:
         # Get SWAP transactions only
         swap_df = df[df['tx_type'] == 'SWAP'].copy()
         
-        for idx in swap_df.index:
+        # Process swaps with progress bar
+        for idx in tqdm(swap_df.index, 
+                       desc="Processing ticks", 
+                       leave=False,
+                       position=1):
             tick = swap_df.loc[idx, 'current_tick']
             if not pd.isna(tick):
                 buckets.loc[idx] = int(float(tick) // self.tick_spacing)
@@ -123,34 +131,49 @@ class FeatureEngine:
         """Compute wealth from position changes."""
         wealth = pd.Series(0.0, index=df.index)
         
-        # Process transactions sequentially
+        # Process transactions sequentially with progress bar
         cumulative_wealth = 0.0
-        for idx in df.index:
+        for idx in tqdm(df.index, 
+                       desc="Computing wealth", 
+                       leave=False,
+                       position=1):
             tx = df.loc[idx]
             if tx['tx_type'] in ['MINT', 'BURN']:
                 amount0 = abs(float(tx['amount0'])) if not pd.isna(tx['amount0']) else 0
                 amount1 = abs(float(tx['amount1'])) if not pd.isna(tx['amount1']) else 0
-                cumulative_wealth += (amount0 + amount1) / 2  # Scale by 2 instead of 4
+                cumulative_wealth += (amount0 + amount1) / 2
             elif tx['tx_type'] == 'COLLECT':
                 amount0 = abs(float(tx['amount0'])) if not pd.isna(tx['amount0']) else 0
                 amount1 = abs(float(tx['amount1'])) if not pd.isna(tx['amount1']) else 0
-                cumulative_wealth += (amount0 + amount1) / 2  # Scale by 2 instead of 4
+                cumulative_wealth += (amount0 + amount1) / 2
             wealth.loc[idx] = cumulative_wealth
             
         return wealth
         
     def compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Compute all features for ODRA strategy."""
+        logger.info("Computing features with progress tracking...")
+        
         # Initialize features DataFrame
         features = pd.DataFrame(index=df.index)
         
-        # Compute individual features
-        features['ewma_volume'] = self.compute_ewma_volume(df)
-        features['center_bucket'] = self.compute_center_bucket(df)
-        features['wealth'] = self.compute_wealth(df)
-        
-        # Compute pool price
-        features['pool_price'] = df['sqrtPriceX96'].apply(self.compute_price)
+        # Show progress for each feature computation
+        with tqdm(total=4, desc="Computing Features") as pbar:
+            pbar.set_description("Computing EWMA volume")
+            features['ewma_volume'] = self.compute_ewma_volume(df)
+            pbar.update(1)
+            
+            pbar.set_description("Computing center bucket")
+            features['center_bucket'] = self.compute_center_bucket(df)
+            pbar.update(1)
+            
+            pbar.set_description("Computing wealth")
+            features['wealth'] = self.compute_wealth(df)
+            pbar.update(1)
+            
+            pbar.set_description("Computing pool price")
+            features['pool_price'] = df['sqrtPriceX96'].apply(self.compute_price)
+            pbar.update(1)
         
         # Compute normalized time
         features['t_T'] = np.linspace(0, 1, len(features))
@@ -166,16 +189,20 @@ class FeatureEngine:
         Returns:
             DataFrame with normalized features
         """
+        logger.info("Normalizing features...")
         normalized = features.copy()
         
-        # Keep t_T unchanged
-        for col in normalized.columns:
-            if col != 't_T':
-                mean = normalized[col].mean()
-                std = normalized[col].std()
-                if std > 1e-10:  # If there is variation
-                    normalized[col] = (normalized[col] - mean) / std
-                else:  # If no variation, center at 0 with tiny noise
-                    normalized[col] = np.random.normal(0, 1e-10, len(normalized))
+        with tqdm(total=len(features.columns)-1, desc="Normalizing Features") as pbar:
+            # Keep t_T unchanged
+            for col in normalized.columns:
+                if col != 't_T':
+                    pbar.set_description(f"Normalizing {col}")
+                    mean = normalized[col].mean()
+                    std = normalized[col].std()
+                    if std > 1e-10:  # If there is variation
+                        normalized[col] = (normalized[col] - mean) / std
+                    else:  # If no variation, center at 0 with tiny noise
+                        normalized[col] = np.random.normal(0, 1e-10, len(normalized))
+                    pbar.update(1)
         
         return normalized 

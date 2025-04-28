@@ -10,6 +10,8 @@ import numpy as np
 import logging
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
+from tqdm import tqdm
+import time
 
 from .network import ODRANetwork
 from ..utils.logging_utils import setup_logging
@@ -49,6 +51,10 @@ class ODRATrainer:
         # Training history
         self.train_losses: List[float] = []
         self.val_losses: List[float] = []
+        
+        # Setup logging
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
         
     def prepare_batch(self, 
                      features: torch.Tensor,
@@ -124,8 +130,8 @@ class ODRATrainer:
               train_wealth: np.ndarray,
               val_features: Optional[np.ndarray] = None,
               val_wealth: Optional[np.ndarray] = None,
-              checkpoint_dir: str = 'outputs/models') -> None:
-        """Train network.
+              checkpoint_dir: str = 'outputs/models') -> Dict:
+        """Train network with detailed progress tracking.
         
         Args:
             train_features: Training features
@@ -133,10 +139,18 @@ class ODRATrainer:
             val_features: Validation features
             val_wealth: Validation wealth values
             checkpoint_dir: Directory to save checkpoints
+            
+        Returns:
+            Dictionary of training metrics
         """
         # Convert to tensors
-        train_features = torch.FloatTensor(train_features)
-        train_wealth = torch.FloatTensor(train_wealth)
+        self.logger.info("Converting data to tensors...")
+        train_features = torch.FloatTensor(train_features).to(self.device)
+        train_wealth = torch.FloatTensor(train_wealth).to(self.device)
+        
+        if val_features is not None and val_wealth is not None:
+            val_features = torch.FloatTensor(val_features).to(self.device)
+            val_wealth = torch.FloatTensor(val_wealth).to(self.device)
         
         # Create data loaders
         train_dataset = TensorDataset(train_features, train_wealth)
@@ -147,8 +161,6 @@ class ODRATrainer:
         )
         
         if val_features is not None and val_wealth is not None:
-            val_features = torch.FloatTensor(val_features)
-            val_wealth = torch.FloatTensor(val_wealth)
             val_dataset = TensorDataset(val_features, val_wealth)
             val_loader = DataLoader(
                 val_dataset,
@@ -163,29 +175,54 @@ class ODRATrainer:
         
         # Training loop
         best_val_loss = float('inf')
-        patience = self.config.get('patience', 10)
         patience_counter = 0
+        training_start = time.time()
         
-        for epoch in range(self.n_epochs):
-            # Train
-            epoch_loss = 0.0
-            n_batches = 0
+        # Print training setup
+        self.logger.info("=" * 50)
+        self.logger.info("Training Setup:")
+        self.logger.info(f"Device: {self.device}")
+        self.logger.info(f"Training samples: {len(train_features):,}")
+        self.logger.info(f"Validation samples: {len(val_features):,}" if val_features is not None else "No validation set")
+        self.logger.info(f"Batch size: {self.batch_size}")
+        self.logger.info(f"Max epochs: {self.n_epochs}")
+        self.logger.info(f"Learning rate: {self.learning_rate}")
+        self.logger.info("=" * 50)
+        
+        # Main training loop with progress bar
+        epoch_pbar = tqdm(range(self.n_epochs), desc="Training Progress", position=0)
+        
+        for epoch in epoch_pbar:
+            # Training phase
+            self.network.train()
+            train_losses = []
             
-            for features, wealth in train_loader:
-                features, wealth = self.prepare_batch(features, wealth)
+            # Batch progress bar
+            batch_pbar = tqdm(train_loader, 
+                            desc=f"Epoch {epoch+1}/{self.n_epochs}",
+                            position=1, 
+                            leave=False)
+            
+            for batch_features, batch_wealth in batch_pbar:
+                features, wealth = self.prepare_batch(batch_features, batch_wealth)
                 loss = self.train_step(features, wealth)
-                epoch_loss += loss
-                n_batches += 1
+                train_losses.append(loss)
                 
-            avg_train_loss = epoch_loss / n_batches
-            self.train_losses.append(avg_train_loss)
+                # Update batch progress bar
+                batch_pbar.set_postfix({
+                    'loss': f"{loss:.4f}",
+                    'avg_loss': f"{np.mean(train_losses):.4f}"
+                })
             
-            # Validate
+            # Close batch progress bar
+            batch_pbar.close()
+            
+            # Validation phase
             if val_loader is not None:
                 val_loss = self.validate(val_loader)
                 self.val_losses.append(val_loss)
                 
-                # Early stopping
+                # Early stopping check
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0
@@ -196,18 +233,25 @@ class ODRATrainer:
                     )
                 else:
                     patience_counter += 1
-                    
-                if patience_counter >= patience:
-                    logger.info(f'Early stopping at epoch {epoch}')
-                    break
-                    
-                logger.info(
-                    f'Epoch {epoch}: train_loss={avg_train_loss:.4f}, '
-                    f'val_loss={val_loss:.4f}'
-                )
-            else:
-                logger.info(f'Epoch {epoch}: train_loss={avg_train_loss:.4f}')
                 
+                # Update epoch progress bar
+                epoch_pbar.set_postfix({
+                    'train_loss': f"{np.mean(train_losses):.4f}",
+                    'val_loss': f"{val_loss:.4f}",
+                    'best_val': f"{best_val_loss:.4f}",
+                    'time': f"{(time.time() - training_start)/60:.1f}m"
+                })
+                
+                if patience_counter >= self.config.get('patience', 10):
+                    self.logger.info(f"\nEarly stopping triggered after {epoch+1} epochs")
+                    break
+            else:
+                # Update epoch progress bar without validation metrics
+                epoch_pbar.set_postfix({
+                    'train_loss': f"{np.mean(train_losses):.4f}",
+                    'time': f"{(time.time() - training_start)/60:.1f}m"
+                })
+            
             # Save checkpoint
             if (epoch + 1) % self.config.get('checkpoint_freq', 10) == 0:
                 torch.save(
@@ -220,7 +264,25 @@ class ODRATrainer:
                     },
                     checkpoint_path / f'checkpoint_epoch_{epoch}.pt'
                 )
-                
+        
+        # Training summary
+        training_time = (time.time() - training_start) / 60
+        self.logger.info("\n" + "=" * 50)
+        self.logger.info("Training Summary:")
+        self.logger.info(f"Total epochs trained: {epoch + 1}")
+        self.logger.info(f"Best validation loss: {best_val_loss:.4f}")
+        self.logger.info(f"Final training loss: {np.mean(train_losses):.4f}")
+        self.logger.info(f"Training time: {training_time:.1f} minutes")
+        self.logger.info("=" * 50)
+        
+        return {
+            'final_train_loss': np.mean(train_losses),
+            'final_val_loss': val_loss if val_loader else float('inf'),
+            'best_val_loss': best_val_loss if val_loader else float('inf'),
+            'epochs_trained': epoch + 1,
+            'training_time_minutes': training_time
+        }
+        
     def load_checkpoint(self, checkpoint_path: str) -> None:
         """Load model from checkpoint.
         
