@@ -66,12 +66,6 @@ class DataLoader:
         # Convert timestamp to datetime
         combined_df['block_timestamp'] = pd.to_datetime(combined_df['block_timestamp'])
         
-        # Convert sqrtPriceX96 to float carefully
-        combined_df['sqrtPriceX96'] = pd.to_numeric(combined_df['sqrtPriceX96'], errors='coerce')
-        
-        # Sort by block timestamp
-        combined_df = combined_df.sort_values('block_timestamp')
-        
         return combined_df
         
     def process_data(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -83,9 +77,12 @@ class DataLoader:
         Returns:
             Processed DataFrame with features
         """
-        # Convert price to float
-        df['sqrtPriceX96'] = df['sqrtPriceX96'].astype(float)
-        df['price'] = (df['sqrtPriceX96'] / 2**96) ** 2
+        # Convert sqrtPriceX96 to numeric carefully
+        df['sqrtPriceX96'] = pd.to_numeric(df['sqrtPriceX96'], errors='coerce')
+        
+        # Calculate price using numpy to handle large numbers
+        sqrt_price = df['sqrtPriceX96'].to_numpy(dtype=np.float64)
+        df['price'] = np.square(sqrt_price / (2**96))
         
         # Process different transaction types
         df_processed = pd.DataFrame()
