@@ -39,6 +39,18 @@ strategy:
   rebalance_threshold: 0.02  # Price change threshold for rebalancing
   gas_cost: 0.01  # Estimated gas cost in ETH for rebalancing
 
+# Simulator parameters
+simulator:
+  tau: 3  # Number of buckets for position range
+  tick_spacing: 60  # Must match pool tick spacing
+  fee_tier: 0.003  # Must match pool fee tier
+  initial_price: 1800.0  # Initial ETH price in USD
+  initial_liquidity: 100.0  # Initial liquidity in ETH
+  min_sqrt_ratio: 4295128739  # Minimum valid sqrtPriceX96
+  max_sqrt_ratio: 1461446703485210103287273052203988822378723970342  # Maximum valid sqrtPriceX96
+  position_width: 6  # Default width of positions in ticks
+  rebalance_cost: 0.01  # Gas cost for rebalancing in ETH
+
 # Utility function
 utility:
   risk_aversion: 0.01  # CARA utility risk aversion parameter
