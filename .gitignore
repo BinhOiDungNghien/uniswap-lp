@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Raw data files
+odra_strategy/data/raw/*.csv
+odra_strategy/data/raw/*.tick.csv
+odra_strategy/data/processed/*.pkl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Logs
+*.log
+logs/
+outputs/
+
+# Model checkpoints
+outputs/models/
+
+# Mac
+.DS_Store
+
+# Project specific
+odra_strategy/outputs/
+odra_strategy/data/processed/
+*.pkl
+*.pt
+*.log
+
+# Keep example config
+!odra_strategy/config/odra_config.yml 

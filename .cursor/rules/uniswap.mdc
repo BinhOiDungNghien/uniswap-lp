@@ -1,0 +1,217 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+---
+
+### 🧠 `cursor_rule`: ODRA Strategy Engineering Guidelines (Uniswap v3, Real Tick-Level Data)
+
+> **Mục tiêu**:  
+> Giữ cho dự án ODRA vững chắc, dễ mở rộng và duy trì, đồng thời phản ánh chính xác chiến lược Optimal Dynamic Reset Allocation dựa trên dữ liệu thực từ Uniswap v3.
+
+---
+
+## I. 📐 Code Architecture & Design Principles
+
+1. **Modular Structure**:
+   - Mỗi thành phần trong pipeline (data parsing, feature extraction, simulation, NN training, evaluation) phải được đóng gói thành module độc lập.
+   - Tuân theo nguyên tắc **separation of concerns**.
+
+2. **Abstraction Layers**:
+   - Tách riêng:
+     - `DataLoader`: Đọc và chuẩn hóa tick-level data (SWAP, MINT, BURN, COLLECT)
+     - `FeatureEngine`: Tính toán ewma_volume, center_bucket, wealth, etc.
+     - `StrategySimulator`: Giả lập hành vi LP theo ODRA
+     - `UtilityEvaluator`: Tính CARA utility và cập nhật reward
+     - `ModelTrainer`: Quản lý học NN
+
+3. **Config-Driven Design**:
+   - Mọi siêu tham số như `tau`, `alpha`, `learning_rate`, `episode_length`, v.v... nên được lưu trong file YAML/TOML `.config/odra.yml`.
+
+4. **Typing & Contracts**:
+   - Luôn sử dụng type hint đầy đủ cho mọi function, đặc biệt với input/output của neural net và data loader.
+
+---
+
+## II. 🧠 Strategy-Specific Implementation Rules
+
+1. **Tick-Level Data Handling**:
+   - Mỗi loại giao dịch phải được xử lý riêng:
+     - **SWAP**: Cập nhật `sqrtPriceX96`, `ewma_volume`, kích hoạt rebalance
+     - **MINT/BURN**: Điều chỉnh thanh khoản, mô phỏng cạnh tranh LP
+     - **COLLECT**: Ghi nhận fee, tính PnL thực tế
+
+2. **Price & Bucket Computation**:
+   - `price = (int(sqrtPriceX96) / 2**96)**2`
+   - `center_bucket = int(current_tick // tick_spacing)`
+
+3. **Rebalance Logic**:
+   - Duy trì `last_center_bucket`, cập nhật khi:  
+     `abs(current_bucket - last_center_bucket) > tau`
+
+4. **Per-Position Tracking**:
+   - Mọi MINT, BURN, COLLECT phải gắn với `position_id`, dùng để:
+     - Tái dựng wealth
+     - Đánh giá chiến lược LP
+     - Dự đoán hành vi thực tế LP cạnh tranh
+
+🧠 Non-Arbitrage Transactions
+
+Purpose: Capture regular swap activity not driven by arbitrage.
+Identification:
+Small price change relative to fee tier.
+No immediate reversal in price (non-sandwich).
+Used For:
+Feeding into EWMA volume.
+Simulating natural market demand.
+Improving realism of volume-based features.
+Application in ODRA:
+Trains model in realistic environment.
+Avoids overfitting to adversarial or bot-driven behavior.
+🧠 Integration Tip
+
+Use all 4 tx types (SWAP, MINT, BURN, COLLECT).
+Distinguish arbitrage vs. non-arbitrage SWAPs.
+Use swaps between MINT–BURN to simulate realized strategy paths.
+Construct per-position state over time.
+
+---
+
+## III. 🤖 Neural Network Design Guidelines
+
+1. **Input Features (5)**:
+   - `t / T`, `ewma_volume`, `pool_price`, `center_bucket`, `wealth`
+   - Đảm bảo **chuẩn hóa** (`z-score`, min-max) trước khi huấn luyện
+
+2. **Model Structure**:
+   - 5 tầng ẩn × 16 ReLU
+   - Output: `2 * tau + 2` softmax (probabilities over buckets + outside pool)
+
+3. **Loss Function**:
+   - Dựa trên CARA Utility:
+     ```python
+     def utility(x, a): return (1 - np.exp(-a * x)) / a if a != 0 else x
+     loss = -mean(utility(wealth_final))
+     ```
+
+4. **Learning Pipeline**:
+   - Chạy mô phỏng trên đoạn tick-level (ví dụ: 1000 SWAPs)
+   - Ghi nhận trạng thái đầu vào, vector phân bổ, và utility cuối
+   - Backpropagation theo `-mean(utility)` để cập nhật NN
+
+---
+
+## IV. 🧪 Evaluation & Maintenance
+
+1. **Logging + Visualization**:
+   - Mỗi lần train: log profit, utility, allocation entropy
+   - Dùng `matplotlib`/`plotly` để kiểm tra:  
+     - Đường giá + vùng LP hoạt động  
+     - Fee tích lũy  
+     - Wealth over time
+
+2. **Versioning**:
+   - Mọi phiên bản mô hình nên được lưu kèm:
+     - Config
+     - Random seed
+     - Training logs
+     - Evaluation snapshot
+
+3. **Test Suite**:
+   - Viết unit test cho:
+     - price reconstruction
+     - feature computation
+     - rebalancing trigger
+     - utility evaluation
+
+---
+
+## V. ✅ Summary of Best Practices
+
+| Component         | Rule                                                                 |
+|------------------|----------------------------------------------------------------------|
+| Data             | Luôn phân tích 4 loại tx riêng, dùng `position_id` để tái dựng LP    |
+| Feature          | Tính `ewma_volume`, `center_bucket`, `wealth` đúng chuẩn kỹ thuật     |
+| Strategy Logic   | Dùng τ-bucket + price trigger để kiểm soát rebalance                 |
+| Model            | Đầu vào 5 chiều → NN → phân bổ softmax                               |
+| Simulation       | Giả lập MINT/BURN/COLLECT theo phân bổ và fee                       |
+| Utility Function | CARA-based → phản ánh rủi ro thực của LP                             |
+| Training         | Học trên tập tick-level, normalize reward theo episode               |
+
+---
+
+> 📌 **Ghi chú cuối**: Mục tiêu là mô hình hóa hành vi của LP theo cách phản ánh sát nhất dữ liệu lịch sử. Code cần mô đun, rõ ràng, tránh hard-code logic tài chính vào trong kiến trúc AI.
+
+---
+📁 ODRA Strategy Project Structure (Python-based, Tick-level Uniswap v3)
+
+odra_strategy/
+│
+├── config/
+│   └── odra_config.yml           # Tất cả hyperparams, đường dẫn, chiến lược, v.v.
+│
+├── data/
+│   ├── raw/                      # Tick-level Uniswap v3 data (gốc, chưa xử lý)
+│   ├── processed/                # Dữ liệu sau khi đã clean, chuẩn hóa
+│   └── utils/                    # Scripts phụ trợ để tải, kiểm tra dữ liệu
+│
+├── features/
+│   ├── extractor.py              # EWMA volume, bucket, wealth, ...
+│   └── feature_config.py         # Config cho feature engineering
+│
+├── strategy/
+│   ├── rebalance_logic.py        # Rebalancing trigger: price exit τ-bucket
+│   ├── liquidity_sim.py          # Mô phỏng MINT/BURN/COLLECT
+│   ├── utility.py                # CARA utility + wealth calculation
+│   └── strategy_runner.py        # Chạy mô hình ODRA trên toàn episode
+│
+├── model/
+│   ├── network.py                # Neural net architecture (5 input → softmax output)
+│   ├── trainer.py                # Huấn luyện mô hình
+│   ├── loss.py                   # Utility-based loss function
+│   └── evaluator.py              # Đánh giá kết quả mô phỏng
+│
+├── simulator/
+│   └── tick_simulator.py         # Replay tick-level data, tích hợp strategy
+│
+├── outputs/
+│   ├── models/                   # Trained model checkpoints
+│   ├── logs/                     # Training logs, evaluation metrics
+│   └── plots/                    # Biểu đồ chiến lược, wealth, fee, rebalancing
+│
+├── notebooks/
+│   └── exploratory/              # Jupyter notebooks khám phá dữ liệu, ý tưởng mới
+│
+├── tests/
+│   ├── test_data.py              # Test load và xử lý dữ liệu
+│   ├── test_features.py          # Test extractor
+│   ├── test_strategy.py          # Test logic rebalance + utility
+│   └── test_model.py             # Test model training, loss, evaluation
+│
+├── main.py                       # Entry point (CLI: train / test / evaluate)
+└── README.md                     # Giải thích tổng quan ODRA strategy + cách chạy
+
+--
+🔧 File odra_config.yml – ví dụ cấu hình
+
+tau: 3
+alpha_ewma: 0.05
+tick_spacing: 60
+
+model:
+  hidden_layers: 5
+  hidden_units: 16
+  learning_rate: 0.001
+  optimizer: adam
+  max_steps: 10000
+  patience: 10000
+
+data:
+  raw_path: data/raw/ticks.csv
+  processed_path: data/processed/odra_dataset.pkl
+  episode_length: 1000
+
+utility:
+  risk_aversion: 0.01
+

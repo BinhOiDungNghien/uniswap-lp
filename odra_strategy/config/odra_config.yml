@@ -1,0 +1,64 @@
+# ODRA Strategy Configuration
+
+# Data parameters
+data:
+  raw_path: "data/raw/"
+  processed_path: "data/processed/odra_dataset.pkl"
+  episode_length: 1000  # Number of transactions per episode
+  validation_split: 0.2
+  test_split: 0.1
+
+# Feature engineering parameters
+features:
+  alpha_ewma: 0.05  # EWMA decay factor
+  tick_spacing: 60  # Pool tick spacing
+  tau: 3  # Reset threshold in ticks
+  fee_tier: 0.003  # Pool fee tier (0.3%)
+  price_impact_threshold: 0.001  # Threshold for non-arbitrage detection
+
+# Model architecture
+model:
+  input_dim: 5  # [t/T, ewma_volume, pool_price, center_bucket, wealth]
+  hidden_layers: 5
+  hidden_units: 16
+  activation: "relu"
+  output_activation: "softmax"
+  learning_rate: 0.001
+  optimizer: "adam"
+  batch_size: 32
+  max_steps: 10000
+  patience: 1000  # Early stopping patience
+  checkpoint_freq: 100
+
+# Strategy parameters
+strategy:
+  min_position_size: 0.01  # Minimum position size in ETH
+  max_position_size: 10.0  # Maximum position size in ETH
+  min_tick_width: 2  # Minimum width of position in ticks
+  max_tick_width: 10  # Maximum width of position in ticks
+  rebalance_threshold: 0.02  # Price change threshold for rebalancing
+  gas_cost: 0.01  # Estimated gas cost in ETH for rebalancing
+
+# Utility function
+utility:
+  risk_aversion: 0.01  # CARA utility risk aversion parameter
+  wealth_scale: 1000.0  # Scale factor for wealth normalization
+
+# Logging and output
+logging:
+  log_dir: "outputs/logs/"
+  model_dir: "outputs/models/"
+  plot_dir: "outputs/plots/"
+  log_level: "INFO"
+  plot_freq: 100  # Plot every N episodes
+  metrics:
+    - "wealth"
+    - "fees_collected"
+    - "active_positions"
+    - "rebalance_count"
+    - "utility"
+    - "sharpe_ratio"
+    - "max_drawdown"
+
+# Random seed for reproducibility
+seed: 42 
