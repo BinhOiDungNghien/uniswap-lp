@@ -22,7 +22,6 @@ wheels/
 
 # Raw data files
 odra_strategy/data/raw/*.csv
-odra_strategy/data/raw/*.tick.csv
 odra_strategy/data/processed/*.pkl
 
 # IDE
@@ -41,23 +40,18 @@ env/
 venv/
 ENV/
 
-# Logs
-*.log
-logs/
-outputs/
-
-# Model checkpoints
-outputs/models/
-
-# Mac
-.DS_Store
-
 # Project specific
 odra_strategy/outputs/
-odra_strategy/data/processed/
 *.pkl
 *.pt
 *.log
+
+# Mac
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
 
 # Keep example config
 !odra_strategy/config/odra_config.yml 
