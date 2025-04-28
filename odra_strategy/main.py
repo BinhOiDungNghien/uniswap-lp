@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from typing import Dict, List, Tuple
+import os
 
 from odra_strategy.data.data_loader import DataLoader
 from odra_strategy.features.feature_engine import FeatureEngine
@@ -19,12 +20,11 @@ from odra_strategy.model.trainer import ODRATrainer
 from odra_strategy.model.evaluator import ODRAEvaluator
 from odra_strategy.model.loss import EntropyRegularizedLoss, TransactionCostLoss
 from odra_strategy.utils.logging_utils import setup_logging
+from utils.kaggle_utils import adjust_paths_for_kaggle, setup_kaggle_environment
 
 def load_config(config_path: str) -> Dict:
-    """Load configuration from YAML file."""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+    """Load and adjust configuration based on environment."""
+    return adjust_paths_for_kaggle(config_path)
 
 def prepare_data(data_loader: DataLoader,
                 feature_engine: FeatureEngine,
@@ -161,57 +161,29 @@ def evaluate_model(network: ODRANetwork,
     logging.info(f"Maximum Drawdown: {risk_metrics['max_drawdown']:.4f}")
 
 def main():
-    """Main execution function."""
-    # Parse arguments
-    parser = argparse.ArgumentParser(description='ODRA Strategy')
-    parser.add_argument('--config', type=str, required=True,
-                       help='Path to configuration file')
-    parser.add_argument('--mode', type=str, choices=['train', 'evaluate'],
-                       default='train', help='Execution mode')
+    parser = argparse.ArgumentParser(description='ODRA Strategy Training')
+    parser.add_argument('--config', type=str, required=True, help='Path to config file')
+    parser.add_argument('--mode', type=str, required=True, choices=['process', 'train', 'evaluate'],
+                       help='Mode to run: process data, train model, or evaluate')
     args = parser.parse_args()
+
+    # Setup Kaggle environment if needed
+    setup_kaggle_environment()
     
-    # Load configuration
+    # Load config with adjusted paths
     config = load_config(args.config)
     
-    # Setup logging
-    setup_logging(config['logging']['log_dir'])
+    if args.mode == 'process':
+        data_loader = DataLoader(config['data'])
+        data_loader.process_raw_data()
     
-    # Initialize components
-    data_loader = DataLoader(config['data'])
-    feature_engine = FeatureEngine(config['features'])
-    simulator = StrategySimulator(config['simulator'])
+    elif args.mode == 'train':
+        trainer = ODRATrainer(config)
+        trainer.train()
     
-    if args.mode == 'train':
-        # Prepare data
-        features, wealth = prepare_data(data_loader, feature_engine, simulator, config)
-        
-        # Train model
-        network = train_model(features, wealth, config)
-        
-        # Save model
-        torch.save(
-            network.state_dict(),
-            Path(config['model']['checkpoint_dir']) / 'final_model.pt'
-        )
-        
     elif args.mode == 'evaluate':
-        # Load model
-        network = ODRANetwork(
-            input_dim=5,
-            hidden_dims=[config['model']['hidden_units']] * config['model']['hidden_layers'],
-            tau=config['simulator']['tau']
-        )
-        network.load_state_dict(
-            torch.load(
-                Path(config['model']['checkpoint_dir']) / 'final_model.pt'
-            )
-        )
-        
-        # Prepare evaluation data
-        features, wealth = prepare_data(data_loader, feature_engine, simulator, config)
-        
-        # Evaluate
-        evaluate_model(network, features, wealth, config)
+        evaluator = ODRAEvaluator(config)
+        evaluator.evaluate()
 
 if __name__ == '__main__':
     main() 

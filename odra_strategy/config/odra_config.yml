@@ -2,7 +2,7 @@
 
 # Data parameters
 data:
-  raw_path: "/kaggle/working/uniswap-lp/odra_strategy/data/raw"
+  raw_path: /data/raw"
   processed_path: "data/processed/odra_dataset.pkl"
   episode_length: 1000  # Number of transactions per episode
   validation_split: 0.2
