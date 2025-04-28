@@ -41,7 +41,7 @@ alwaysApply: true
      - **SWAP**: Cập nhật `sqrtPriceX96`, `ewma_volume`, kích hoạt rebalance
      - **MINT/BURN**: Điều chỉnh thanh khoản, mô phỏng cạnh tranh LP
      - **COLLECT**: Ghi nhận fee, tính PnL thực tế
-
+   - Nhớ nhân với decimals của mỗi token khi tính toán.
 2. **Price & Bucket Computation**:
    - `price = (int(sqrtPriceX96) / 2**96)**2`
    - `center_bucket = int(current_tick // tick_spacing)`
