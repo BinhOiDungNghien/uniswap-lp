@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from tqdm import tqdm
 import time
+import pandas as pd
 
 from .network import ODRANetwork
 from ..utils.logging_utils import setup_logging
@@ -94,8 +95,17 @@ class ODRATrainer:
         utility = self.network.compute_utility(wealth, self.risk_aversion)
         loss = -torch.mean(utility)  # Negative because we want to maximize utility
         
+        # Add L2 regularization
+        l2_lambda = 0.01
+        l2_norm = sum(p.pow(2.0).sum() for p in self.network.parameters())
+        loss = loss + l2_lambda * l2_norm
+        
         # Backward pass
         loss.backward()
+        
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=1.0)
+        
         self.optimizer.step()
         
         return loss.item()
@@ -145,12 +155,37 @@ class ODRATrainer:
         """
         # Convert to tensors
         self.logger.info("Converting data to tensors...")
-        train_features = torch.FloatTensor(train_features).to(self.device)
-        train_wealth = torch.FloatTensor(train_wealth).to(self.device)
+        
+        # Define columns to exclude from training
+        categorical_cols = ['tx_type', 'position_id']
+        
+        def prepare_features(features):
+            """Helper function to prepare features for training."""
+            if isinstance(features, pd.DataFrame):
+                # Get only numeric columns
+                numeric_features = features.select_dtypes(include=[np.number])
+                # Drop any remaining categorical columns
+                for col in categorical_cols:
+                    if col in numeric_features.columns:
+                        numeric_features = numeric_features.drop(columns=[col])
+                return numeric_features.values.astype(np.float32)
+            elif isinstance(features, np.ndarray):
+                return features.astype(np.float32)
+            else:
+                raise ValueError(f"Unsupported feature type: {type(features)}")
+        
+        # Prepare features
+        train_features = prepare_features(train_features)
+        if val_features is not None:
+            val_features = prepare_features(val_features)
+        
+        # Convert to tensors with gradient tracking
+        train_features = torch.tensor(train_features, dtype=torch.float32, requires_grad=True).to(self.device)
+        train_wealth = torch.tensor(train_wealth, dtype=torch.float32, requires_grad=True).to(self.device)
         
         if val_features is not None and val_wealth is not None:
-            val_features = torch.FloatTensor(val_features).to(self.device)
-            val_wealth = torch.FloatTensor(val_wealth).to(self.device)
+            val_features = torch.tensor(val_features, dtype=torch.float32, requires_grad=True).to(self.device)
+            val_wealth = torch.tensor(val_wealth, dtype=torch.float32, requires_grad=True).to(self.device)
         
         # Create data loaders
         train_dataset = TensorDataset(train_features, train_wealth)

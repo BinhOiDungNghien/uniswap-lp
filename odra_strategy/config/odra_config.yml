@@ -7,14 +7,20 @@ data:
   episode_length: 1000  # Number of transactions per episode
   validation_split: 0.2
   test_split: 0.1
+  chunk_size: 10000  # Size of chunks for parallel processing
 
 # Feature engineering parameters
 features:
+  n_jobs: 4  # Number of parallel jobs for feature computation
   alpha_ewma: 0.05  # EWMA decay factor
   tick_spacing: 60  # Pool tick spacing
   tau: 3  # Reset threshold in ticks
   fee_tier: 0.003  # Pool fee tier (0.3%)
   price_impact_threshold: 0.001  # Threshold for non-arbitrage detection
+  batch_size: 32  # Batch size for feature computation
+  use_gpu: false  # Whether to use GPU for feature computation if available
+  token0_decimals: 18  # Decimals for token0 (e.g., ETH has 18 decimals)
+  token1_decimals: 6   # Decimals for token1 (e.g., USDC has 6 decimals)
 
 # Model architecture
 model:
@@ -71,6 +77,14 @@ logging:
     - "utility"
     - "sharpe_ratio"
     - "max_drawdown"
+
+# Performance optimization
+performance:
+  use_multiprocessing: true  # Enable parallel processing
+  num_workers: 4  # Number of worker processes
+  prefetch_factor: 2  # Number of batches to prefetch
+  pin_memory: true  # Pin memory for faster data transfer to GPU
+  persistent_workers: true  # Keep workers alive between epochs
 
 # Random seed for reproducibility
 seed: 42 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main entry point for ODRA strategy
+Main entry point for ODRA strategy training and evaluation
 """
 
 import argparse
@@ -21,7 +21,7 @@ from odra_strategy.model.trainer import ODRATrainer
 from odra_strategy.model.evaluator import ODRAEvaluator
 from odra_strategy.model.loss import EntropyRegularizedLoss, TransactionCostLoss
 from odra_strategy.utils.logging_utils import setup_logging
-from utils.kaggle_utils import adjust_paths_for_kaggle, setup_kaggle_environment
+from odra_strategy.utils.kaggle_utils import adjust_paths_for_kaggle, setup_kaggle_environment
 
 def load_config(config_path: str) -> Dict:
     """Load and adjust configuration based on environment."""
@@ -227,16 +227,21 @@ def main():
         
         # Split data for training
         train_size = int(0.8 * len(features))
-        train_features = features.values[:train_size]
+        
+        # Get only numeric features for training
+        numeric_features = features.select_dtypes(include=[np.number])
+        logger.info(f"Training with {len(numeric_features.columns)} numeric features: {', '.join(numeric_features.columns)}")
+        
+        train_features = numeric_features.values[:train_size]
         train_wealth = wealth_history[:train_size]
-        val_features = features.values[train_size:]
+        val_features = numeric_features.values[train_size:]
         val_wealth = wealth_history[train_size:]
         
         # Create network
         logger.info("\nStage 4/4: Model training...")
         logger.info("Initializing neural network...")
         network = ODRANetwork(
-            input_dim=features.shape[1],
+            input_dim=train_features.shape[1],  # Use actual number of numeric features
             hidden_dims=[config['model']['hidden_units']] * config['model']['hidden_layers'],
             tau=config['simulator']['tau']
         )
@@ -246,6 +251,7 @@ def main():
         logger.info(f"Training device: {device}")
         logger.info(f"Training samples: {len(train_features):,}")
         logger.info(f"Validation samples: {len(val_features):,}")
+        logger.info(f"Input features: {train_features.shape[1]}")
         logger.info(f"Batch size: {config['model']['batch_size']}")
         logger.info(f"Max epochs: {config['model']['max_steps']}")
         

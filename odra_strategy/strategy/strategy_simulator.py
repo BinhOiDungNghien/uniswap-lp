@@ -101,16 +101,20 @@ class StrategySimulator:
         if self.current_tx is None:
             return 0
             
-        if 'tick' in self.current_tx:
-            tick = self.current_tx['tick']
-            bucket = tick // self.tick_spacing
+        if 'current_tick' in self.current_tx and not pd.isna(self.current_tx['current_tick']):
+            tick = float(self.current_tx['current_tick'])
+            bucket = int(tick // self.tick_spacing)
             logger.debug(f"Current bucket from tick {tick}: {bucket}")
             return bucket
-        elif self.current_price is not None:
-            tick = sqrt_price_x96_to_tick(int(self.current_price))
-            bucket = tick // self.tick_spacing
-            logger.debug(f"Current bucket from price {self.current_price}: {bucket}")
-            return bucket
+        elif self.current_price is not None and not pd.isna(self.current_price):
+            try:
+                tick = sqrt_price_x96_to_tick(int(self.current_price))
+                bucket = tick // self.tick_spacing
+                logger.debug(f"Current bucket from price {self.current_price}: {bucket}")
+                return bucket
+            except (ValueError, TypeError):
+                logger.warning(f"Could not convert price {self.current_price} to tick")
+                return 0
         return 0
 
     def needs_rebalance(self, current_bucket: Optional[int] = None) -> bool:
@@ -238,8 +242,16 @@ class StrategySimulator:
         
         # Calculate fees per position based on liquidity contribution
         total_fees = 0.0
-        if 'tick' in tx:
-            current_tick = tx['tick']
+        
+        # Check for tick information
+        tick_col = None
+        for col_name in ['tick', 'current_tick']:
+            if col_name in tx:
+                tick_col = col_name
+                break
+                
+        if tick_col is not None:
+            current_tick = tx[tick_col]
             total_liquidity = sum(
                 pos.liquidity 
                 for pos in self.current_positions.values()
@@ -249,10 +261,9 @@ class StrategySimulator:
             if total_liquidity > 0:
                 for position in self.current_positions.values():
                     if position.tick_lower <= current_tick <= position.tick_upper:
-                        position_share = position.liquidity / total_liquidity
-                        position_fees = volume * fee_rate * position_share
-                        position.fees_earned += position_fees
-                        total_fees += position_fees
+                        position_fee = volume * fee_rate * (position.liquidity / total_liquidity)
+                        position.fees_earned += position_fee
+                        total_fees += position_fee
                         
         return total_fees
 
@@ -338,89 +349,64 @@ class StrategySimulator:
         return expanded
 
     def simulate_step(self, tx: pd.Series, allocation_weights: Optional[List[float]] = None) -> dict:
-        """Simulate one step of the strategy.
+        """Simulate a single step of the strategy.
         
         Args:
             tx: Transaction data
-            allocation_weights: Optional list of weights
+            allocation_weights: Optional allocation weights for rebalancing
             
         Returns:
-            dict containing:
-                rebalanced (bool): Whether positions were rebalanced
-                positions (dict): Current position amounts
-                new_positions (dict): New position amounts after rebalance
-                fees (float): Fees collected in this step
-                fees_collected (float): Total fees collected so far
-                wealth (float): Current total wealth
+            Dictionary containing step results
         """
-        # Store current transaction and update price
         self.current_tx = tx
-        if 'sqrtPriceX96' in tx:
-            self.current_price = tx['sqrtPriceX96']
         
-        # Initialize result
-        result = {
-            'rebalanced': False,
-            'positions': {pos.position_id: pos.to_dict() for pos in self.current_positions.values()},
-            'new_positions': {},
-            'fees': 0.0,
-            'fees_collected': self.fees_collected,
-            'wealth': self.wealth
-        }
-        
-        # Calculate fees based on transaction type
-        if tx['type'] == 'SWAP':
-            result['fees'] = self._calculate_swap_fees(tx)
-            self.fees_collected += result['fees']
-            self.wealth += result['fees']
-        elif tx['type'] == 'COLLECT':
-            result['fees'] = float(tx['amount0']) + float(tx['amount1'])
-            self.fees_collected += result['fees']
-            self.wealth += result['fees']
+        # Update current price if available
+        if 'sqrtPriceX96' in tx and not pd.isna(tx['sqrtPriceX96']):
+            try:
+                self.current_price = float(tx['sqrtPriceX96'])
+            except (ValueError, TypeError):
+                logger.warning(f"Could not convert sqrtPriceX96 {tx['sqrtPriceX96']} to float")
+                self.current_price = None
             
-        result['fees_collected'] = self.fees_collected
-        result['wealth'] = self.wealth
+        # Process transaction - handle different column names for transaction type
+        tx_type = None
+        for col_name in ['tx_type', 'type', 'transaction_type']:
+            if col_name in tx:
+                tx_type = tx[col_name]
+                break
+                
+        if tx_type is None:
+            logger.warning("Transaction type column not found. Using default 'SWAP'.")
+            tx_type = 'SWAP'
             
-        # Check if rebalancing is needed and allocation provided
-        if allocation_weights is not None:
-            logger.debug(f"Checking rebalance with allocation: {allocation_weights}")
-            if self.needs_rebalance():
-                logger.debug("Rebalancing needed")
-                # Convert allocation weights to positions
-                new_positions = self._allocate_positions(allocation_weights)
+        # Process transaction based on type
+        if tx_type == 'SWAP':
+            # Calculate and collect fees
+            fees = self._calculate_swap_fees(tx)
+            self.fees_collected += fees
+            self.wealth += fees
+            
+        elif tx_type in ['MINT', 'BURN']:
+            # Update position amounts
+            amount0 = abs(float(tx['amount0'])) if not pd.isna(tx['amount0']) else 0
+            amount1 = abs(float(tx['amount1'])) if not pd.isna(tx['amount1']) else 0
+            self.wealth += (amount0 + amount1) / 2
+            
+        # Check if rebalancing is needed
+        current_bucket = self._get_current_bucket()
+        if self.needs_rebalance(current_bucket):
+            if allocation_weights is not None:
+                # Create new positions based on allocation
+                self.current_positions = self._allocate_positions(allocation_weights)
+                self.last_center_bucket = current_bucket
                 
-                self.current_positions = new_positions
-                self.last_center_bucket = self._get_current_bucket()
-                result['rebalanced'] = True
-                result['positions'] = {pos.position_id: pos.to_dict() for pos in self.current_positions.values()}
-                result['new_positions'] = {pos.position_id: pos.to_dict() for pos in new_positions.values()}
-                logger.debug(f"New positions: {result['new_positions']}")
-            else:
-                logger.debug("No rebalance needed")
-                
-        # Log step data
-        step_data = {
-            'timestamp': None,  # To be filled by caller
-            'old_price': self.current_price if self.current_price is not None else 0,
-            'new_price': self.current_price,
-            'volume': abs(float(tx['amount0'])) + abs(float(tx['amount1'])),
-            'fees_collected': self.fees_collected,
+        # Return step results
+        return {
             'wealth': self.wealth,
-            'positions': self.current_positions,
-            'current_tick': self._get_current_bucket(),
-            'rebalanced': result['rebalanced']
+            'fees_collected': self.fees_collected,
+            'active_positions': len(self.current_positions),
+            'current_bucket': current_bucket
         }
-        
-        log_simulation_step(step_data)
-        
-        # Plot position ranges periodically
-        if result['rebalanced']:
-            plot_price_ranges(
-                self.current_positions,
-                self._get_current_bucket()
-            )
-        
-        return result 
 
     def get_position_stats(self) -> Dict[str, Any]:
         """Get statistics about current positions."""

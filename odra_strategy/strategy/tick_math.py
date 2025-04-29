@@ -1,44 +1,114 @@
 """
-Tick Math Utilities for Uniswap V3 Calculations
-Based on: https://github.com/Uniswap/v3-core/blob/main/contracts/libraries/TickMath.sol
+Utility functions for Uniswap v3 tick and price calculations.
+Based on Uniswap v3 whitepaper and core contracts.
 """
 
 import math
+import numpy as np
 from typing import Tuple
 
-# Constants
+# Constants from Uniswap v3 core
 MIN_TICK = -887272
 MAX_TICK = 887272
-MIN_SQRT_RATIO = 4295128739
-MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342
+Q96 = 2**96
 
-def tick_to_sqrt_price_x96(tick: int) -> int:
-    """Convert a tick to its corresponding sqrtPriceX96."""
-    if tick < MIN_TICK or tick > MAX_TICK:
-        raise ValueError(f"Tick {tick} out of bounds")
+def tick_to_sqrt_price_x96(tick):
+    """Convert a tick value to a sqrtPriceX96 value.
+    
+    Args:
+        tick (int): The tick value to convert
         
-    abs_tick = abs(tick)
-    ratio = 1.0001 ** (abs_tick / 2)
+    Returns:
+        int: The sqrtPriceX96 value
+    """
+    if tick < MIN_TICK:
+        tick = MIN_TICK
+    elif tick > MAX_TICK:
+        tick = MAX_TICK
+        
+    absTick = abs(tick)
+    
+    # Use the mathematical relationship:
+    # sqrtPriceX96 = sqrt(1.0001^tick) * 2^96
+    ratio = math.sqrt(1.0001 ** absTick)
     
     if tick >= 0:
-        sqrt_price_x96 = int(ratio * (2 ** 96))
+        sqrtPriceX96 = int(ratio * Q96)
     else:
-        sqrt_price_x96 = int((2 ** 96) / ratio)
+        sqrtPriceX96 = int((1.0 / ratio) * Q96)
         
-    return max(MIN_SQRT_RATIO, min(MAX_SQRT_RATIO, sqrt_price_x96))
+    return sqrtPriceX96
 
-def sqrt_price_x96_to_tick(sqrt_price_x96: int) -> int:
-    """Convert sqrtPriceX96 to its corresponding tick."""
-    if sqrt_price_x96 < MIN_SQRT_RATIO or sqrt_price_x96 > MAX_SQRT_RATIO:
-        raise ValueError(f"sqrtPriceX96 {sqrt_price_x96} out of bounds")
+def sqrt_price_x96_to_tick(sqrt_price_x96):
+    """Convert a sqrtPriceX96 value to the corresponding tick.
+    
+    Args:
+        sqrt_price_x96 (int): The sqrtPriceX96 value to convert
         
-    ratio = sqrt_price_x96 / (2 ** 96)
-    if ratio >= 1:
-        tick = int(math.log(ratio, 1.0001) * 2)
+    Returns:
+        int: The tick value
+    """
+    # Convert to float for easier math
+    price = (sqrt_price_x96 / Q96) ** 2
+    
+    # Use the mathematical relationship:
+    # tick = log(price) / log(1.0001)
+    if price > 0:
+        tick = int(math.log(price) / math.log(1.0001))
+        
+        # Ensure tick is within bounds
+        tick = max(MIN_TICK, min(tick, MAX_TICK))
+        return tick
     else:
-        tick = -int(math.log(1/ratio, 1.0001) * 2)
+        return 0  # Default to 0 for invalid prices
+
+def price_to_tick(price):
+    """Convert a price value to the nearest tick.
+    
+    Args:
+        price (float): The price to convert
         
-    return max(MIN_TICK, min(MAX_TICK, tick))
+    Returns:
+        int: The nearest tick value
+    """
+    if price <= 0:
+        return 0
+        
+    tick = int(math.log(price) / math.log(1.0001))
+    return max(MIN_TICK, min(tick, MAX_TICK))
+
+def tick_to_price(tick):
+    """Convert a tick value to a price.
+    
+    Args:
+        tick (int): The tick value to convert
+        
+    Returns:
+        float: The price value
+    """
+    if np.isnan(tick):
+        return 1.0
+        
+    tick = max(MIN_TICK, min(int(tick), MAX_TICK))
+    return 1.0001 ** tick
+
+def get_tick_spacing(fee_tier):
+    """Get the tick spacing for a given fee tier.
+    
+    Args:
+        fee_tier (int): The fee tier (e.g., 500, 3000, 10000)
+        
+    Returns:
+        int: The tick spacing
+    """
+    # Standard Uniswap v3 tick spacings
+    TICK_SPACINGS = {
+        100: 1,    # 0.01%
+        500: 10,   # 0.05%
+        3000: 60,  # 0.3%
+        10000: 200 # 1%
+    }
+    return TICK_SPACINGS.get(fee_tier, 60)  # Default to 0.3% tier spacing
 
 def get_liquidity_for_amounts(
     sqrt_price_x96: int,

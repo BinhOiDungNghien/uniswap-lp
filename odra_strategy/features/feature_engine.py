@@ -8,6 +8,8 @@ from typing import Dict, Any
 import logging
 from pathlib import Path
 from tqdm import tqdm
+import multiprocessing as mp
+from functools import partial
 
 logger = logging.getLogger(__name__)
 
@@ -32,177 +34,182 @@ class FeatureEngine:
                 - tick_spacing: Tick spacing for the pool
                 - fee_tier: Pool fee tier (e.g. 0.3% = 3000)
                 - price_impact_threshold: Max price impact to consider non-arbitrage
+                - n_jobs: Number of parallel jobs (default: number of CPU cores)
+                - token0_decimals: Number of decimals for token0 (e.g., 18 for ETH)
+                - token1_decimals: Number of decimals for token1 (e.g., 6 for USDC)
         """
         self.config = config
         self.alpha = config['alpha_ewma']
         self.tick_spacing = config['tick_spacing']
         self.fee_tier = config.get('fee_tier', 3000)
         self.price_impact_threshold = config.get('price_impact_threshold', 0.001)
+        self.n_jobs = config.get('n_jobs', mp.cpu_count())
+        self.token0_decimals = config.get('token0_decimals', 18)
+        self.token1_decimals = config.get('token1_decimals', 6)
         
-    def compute_price(self, sqrtPriceX96: float) -> float:
-        """Compute price from sqrtPriceX96."""
-        if pd.isna(sqrtPriceX96):
-            return 1.0
-        sqrtPriceX96 = int(sqrtPriceX96)
-        return (sqrtPriceX96 / 2**96)**2
-        
-    def is_non_arbitrage_swap(self, df: pd.DataFrame, idx: int) -> bool:
-        """Check if a swap is non-arbitrage."""
-        row = df.iloc[idx]
-        if row['tx_type'] != 'SWAP':
-            return False
-            
-        # First SWAP is always considered non-arbitrage
-        if idx == 0:
-            return True
-            
-        # Get previous SWAP
-        prev_swaps = df[df['tx_type'] == 'SWAP'].iloc[:idx]
-        if len(prev_swaps) == 0:
-            return True
-            
-        prev_swap = prev_swaps.iloc[-1]
-        
-        # Check price impact
-        price_before = self.compute_price(prev_swap['sqrtPriceX96'])
-        price_after = self.compute_price(row['sqrtPriceX96'])
-        
-        if price_before == 0:
-            return True
-            
-        price_impact = abs(price_after - price_before) / price_before
-        if price_impact > self.price_impact_threshold:
-            return False
-            
-        return True
-        
-    def compute_ewma_volume(self, df: pd.DataFrame) -> pd.Series:
-        """Compute EWMA of volume for non-arbitrage swaps."""
-        # Initialize EWMA series for all transactions
-        ewma = pd.Series(0.0, index=df.index)
-        
-        # Get SWAP transactions only
-        swap_df = df[df['tx_type'] == 'SWAP'].copy()
-        
-        if len(swap_df) > 0:
-            # Process first SWAP
-            first_idx = swap_df.index[0]
-            ewma.loc[first_idx] = abs(float(swap_df.loc[first_idx, 'amount0']))
-            last_value = ewma.loc[first_idx]
-            
-            # Process remaining SWAPs with progress bar
-            for idx in tqdm(swap_df.index[1:], 
-                          desc="Processing SWAPS", 
-                          leave=False,
-                          position=1):
-                if self.is_non_arbitrage_swap(df, df.index.get_loc(idx)):
-                    volume = abs(float(swap_df.loc[idx, 'amount0']))
-                    last_value = self.alpha * volume + (1 - self.alpha) * last_value
-                ewma.loc[idx] = last_value
-                
-        # Forward fill for non-SWAP transactions
-        ewma = ewma.fillna(method='ffill')
-        
-        return ewma
-        
-    def compute_center_bucket(self, df: pd.DataFrame) -> pd.Series:
-        """Compute center bucket from tick."""
-        # Initialize buckets for all transactions
-        buckets = pd.Series(index=df.index)
-        
-        # Get SWAP transactions only
-        swap_df = df[df['tx_type'] == 'SWAP'].copy()
-        
-        # Process swaps with progress bar
-        for idx in tqdm(swap_df.index, 
-                       desc="Processing ticks", 
-                       leave=False,
-                       position=1):
-            tick = swap_df.loc[idx, 'current_tick']
-            if not pd.isna(tick):
-                buckets.loc[idx] = int(float(tick) // self.tick_spacing)
-                
-        # Forward fill for non-SWAP transactions
-        buckets = buckets.fillna(method='ffill')
-        
-        return buckets
-        
-    def compute_wealth(self, df: pd.DataFrame) -> pd.Series:
-        """Compute wealth from position changes."""
-        wealth = pd.Series(0.0, index=df.index)
-        
-        # Process transactions sequentially with progress bar
-        cumulative_wealth = 0.0
-        for idx in tqdm(df.index, 
-                       desc="Computing wealth", 
-                       leave=False,
-                       position=1):
-            tx = df.loc[idx]
-            if tx['tx_type'] in ['MINT', 'BURN']:
-                amount0 = abs(float(tx['amount0'])) if not pd.isna(tx['amount0']) else 0
-                amount1 = abs(float(tx['amount1'])) if not pd.isna(tx['amount1']) else 0
-                cumulative_wealth += (amount0 + amount1) / 2
-            elif tx['tx_type'] == 'COLLECT':
-                amount0 = abs(float(tx['amount0'])) if not pd.isna(tx['amount0']) else 0
-                amount1 = abs(float(tx['amount1'])) if not pd.isna(tx['amount1']) else 0
-                cumulative_wealth += (amount0 + amount1) / 2
-            wealth.loc[idx] = cumulative_wealth
-            
-        return wealth
-        
-    def compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Compute all features for ODRA strategy."""
-        logger.info("Computing features with progress tracking...")
-        
-        # Initialize features DataFrame
-        features = pd.DataFrame(index=df.index)
-        
-        # Show progress for each feature computation
-        with tqdm(total=4, desc="Computing Features") as pbar:
-            pbar.set_description("Computing EWMA volume")
-            features['ewma_volume'] = self.compute_ewma_volume(df)
-            pbar.update(1)
-            
-            pbar.set_description("Computing center bucket")
-            features['center_bucket'] = self.compute_center_bucket(df)
-            pbar.update(1)
-            
-            pbar.set_description("Computing wealth")
-            features['wealth'] = self.compute_wealth(df)
-            pbar.update(1)
-            
-            pbar.set_description("Computing pool price")
-            features['pool_price'] = df['sqrtPriceX96'].apply(self.compute_price)
-            pbar.update(1)
-        
-        # Compute normalized time
-        features['t_T'] = np.linspace(0, 1, len(features))
-        
-        return features
-        
-    def normalize_features(self, features: pd.DataFrame) -> pd.DataFrame:
-        """Normalize features using z-score normalization.
+    def _normalize_amount(self, amount: float, is_token0: bool) -> float:
+        """Normalize token amount by its decimals.
         
         Args:
-            features: DataFrame containing raw features
+            amount: Raw token amount
+            is_token0: Whether this is token0 (True) or token1 (False)
             
         Returns:
-            DataFrame with normalized features
+            Normalized amount in standard units
         """
+        decimals = self.token0_decimals if is_token0 else self.token1_decimals
+        return amount / (10 ** decimals)
+        
+    def compute_price_from_tick(self, tick: float) -> float:
+        """Compute price from tick value.
+        
+        Args:
+            tick: The tick value
+            
+        Returns:
+            Price (token1/token0) at this tick
+        """
+        if pd.isna(tick):
+            return 1.0
+        
+        # Price = 1.0001^tick * 10^(decimals1-decimals0)
+        decimal_adjustment = 10 ** (self.token1_decimals - self.token0_decimals)
+        return (1.0001 ** tick) * decimal_adjustment
+        
+    def is_non_arbitrage_swap(self, df_chunk: pd.DataFrame) -> np.ndarray:
+        """Check if swaps are non-arbitrage using vectorized operations."""
+        is_swap = (df_chunk['tx_type'] == 'SWAP').values
+        if not any(is_swap):
+            return np.zeros(len(df_chunk), dtype=bool)
+            
+        prices = np.array([self.compute_price_from_tick(tick) for tick in df_chunk['current_tick'].values])
+        price_changes = np.abs(np.diff(prices, prepend=prices[0])) / (prices + 1e-10)
+        
+        return (is_swap) & (price_changes <= self.price_impact_threshold)
+        
+    def process_chunk(self, df_chunk: pd.DataFrame) -> pd.DataFrame:
+        """Process a chunk of data for parallel computation."""
+        is_valid_swap = self.is_non_arbitrage_swap(df_chunk)
+        
+        # Normalize amounts by token decimals
+        volumes = np.abs(df_chunk['amount0'].astype(float).fillna(0).values)
+        volumes = np.array([self._normalize_amount(x, True) for x in volumes])
+        volumes[~is_valid_swap] = 0
+        
+        # Compute EWMA for chunk
+        ewma = np.zeros_like(volumes)
+        if len(volumes) > 0:
+            ewma[0] = volumes[0]
+            for i in range(1, len(volumes)):
+                ewma[i] = self.alpha * volumes[i] + (1 - self.alpha) * ewma[i-1]
+                
+        # Compute center bucket and prices from ticks
+        ticks = df_chunk['current_tick'].astype(float).fillna(0).values
+        buckets = np.floor(ticks / self.tick_spacing).astype(int)
+        prices = np.array([self.compute_price_from_tick(tick) for tick in ticks])
+        
+        # Compute wealth with normalized amounts
+        wealth = np.zeros_like(volumes)
+        cumulative_wealth = 0.0
+        for i in range(len(df_chunk)):
+            tx = df_chunk.iloc[i]
+            if tx['tx_type'] in ['MINT', 'BURN', 'COLLECT']:
+                amount0 = abs(float(tx['amount0'])) if not pd.isna(tx['amount0']) else 0
+                amount1 = abs(float(tx['amount1'])) if not pd.isna(tx['amount1']) else 0
+                # Normalize amounts by their respective decimals
+                amount0 = self._normalize_amount(amount0, True)
+                amount1 = self._normalize_amount(amount1, False)
+                cumulative_wealth += (amount0 + amount1) / 2
+            wealth[i] = cumulative_wealth
+            
+        return pd.DataFrame({
+            'ewma_volume': ewma,
+            'center_bucket': buckets,
+            'wealth': wealth,
+            'price': prices
+        }, index=df_chunk.index)
+        
+    def compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute all features for ODRA strategy using parallel processing."""
+        logger.info(f"Computing features using {self.n_jobs} parallel jobs...")
+        
+        # Split data into chunks for parallel processing
+        chunk_size = max(1, len(df) // (self.n_jobs * 4))
+        chunks = [df[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
+        
+        # Process chunks in parallel
+        with mp.Pool(self.n_jobs) as pool:
+            results = list(tqdm(
+                pool.imap(self.process_chunk, chunks),
+                total=len(chunks),
+                desc="Processing chunks"
+            ))
+            
+        # Combine results
+        features = pd.concat(results)
+        
+        # Add normalized time
+        features['t_T'] = np.linspace(0, 1, len(features))
+        
+        # Define column types
+        numeric_cols = ['amount0', 'amount1', 'sqrtPriceX96', 'current_tick',
+                       'liquidity', 'tick_lower', 'tick_upper']
+        categorical_cols = ['tx_type', 'position_id']
+        computed_cols = ['ewma_volume', 'center_bucket', 'wealth', 'price', 't_T']
+        
+        # Create a new DataFrame for numeric features only
+        numeric_features = pd.DataFrame()
+        
+        # Add computed features
+        for col in computed_cols:
+            numeric_features[col] = features[col].astype('float32')
+            
+        # Add numeric columns from original data
+        for col in numeric_cols:
+            if col in df.columns:
+                numeric_features[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype('float32')
+                
+        # Store categorical columns separately
+        categorical_features = pd.DataFrame()
+        for col in categorical_cols:
+            if col in df.columns:
+                categorical_features[col] = df[col]
+        
+        # Combine numeric and categorical features
+        final_features = pd.concat([numeric_features, categorical_features], axis=1)
+        
+        return final_features
+        
+    def normalize_features(self, features: pd.DataFrame) -> pd.DataFrame:
+        """Normalize features using vectorized operations."""
         logger.info("Normalizing features...")
         normalized = features.copy()
         
-        with tqdm(total=len(features.columns)-1, desc="Normalizing Features") as pbar:
-            # Keep t_T unchanged
-            for col in normalized.columns:
-                if col != 't_T':
-                    pbar.set_description(f"Normalizing {col}")
-                    mean = normalized[col].mean()
-                    std = normalized[col].std()
-                    if std > 1e-10:  # If there is variation
-                        normalized[col] = (normalized[col] - mean) / std
-                    else:  # If no variation, center at 0 with tiny noise
-                        normalized[col] = np.random.normal(0, 1e-10, len(normalized))
-                    pbar.update(1)
+        # Columns to exclude from normalization
+        exclude_cols = ['t_T', 'tx_type', 'position_id']
         
+        # Get only numeric columns for normalization
+        numeric_cols = features.select_dtypes(include=[np.number]).columns
+        cols_to_normalize = [col for col in numeric_cols if col not in exclude_cols]
+        
+        if not cols_to_normalize:
+            logger.warning("No columns to normalize. Check if data contains numeric features.")
+            return normalized
+            
+        logger.info(f"Normalizing {len(cols_to_normalize)} columns: {', '.join(cols_to_normalize)}")
+        
+        # Calculate statistics
+        means = normalized[cols_to_normalize].mean()
+        stds = normalized[cols_to_normalize].std()
+        
+        # Apply normalization with progress bar
+        with tqdm(total=len(cols_to_normalize), desc="Normalizing columns") as pbar:
+            for col in cols_to_normalize:
+                if stds[col] > 1e-10:  # If there is variation
+                    normalized[col] = (normalized[col] - means[col]) / (stds[col] + 1e-10)
+                else:  # If no variation, center at 0 with tiny noise
+                    normalized[col] = np.random.normal(0, 1e-10, len(normalized))
+                pbar.update(1)
+        
+        logger.info("Feature normalization completed")
         return normalized 
