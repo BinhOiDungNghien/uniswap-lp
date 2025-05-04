@@ -283,11 +283,11 @@ class StrategySimulator:
         """Calculate fees from swap following Uniswap V3 formula."""
         try:
             # Adjust amounts for decimals
-            amount0 = self._adjust_for_decimals(abs(float(tx['amount0'])), self.token0_decimals)
-            amount1 = self._adjust_for_decimals(abs(float(tx['amount1'])), self.token1_decimals)
+            amount0 = self._adjust_for_decimals(abs(float(tx['amount0_adjusted'])), self.token0_decimals)
+            amount1 = self._adjust_for_decimals(abs(float(tx['amount1_adjusted'])), self.token1_decimals)
             
             # Calculate fee based on token being swapped in
-            if float(tx['amount0']) < 0:  # Swap token0 -> token1
+            if float(tx['amount0_adjusted']) < 0:  # Swap token0 -> token1
                 fee_amount = amount0 * Decimal(self.fee_tier) / Decimal(1_000_000)
             else:  # Swap token1 -> token0
                 price_dec = self._validate_sqrt_price(tx['sqrtPriceX96'])
@@ -319,8 +319,8 @@ class StrategySimulator:
 
     def process_collect(self, tx: pd.Series) -> Decimal:
         """Process COLLECT transaction and return value in terms of wealth."""
-        amount0 = self._adjust_for_decimals(float(tx['amount0']), self.token0_decimals)
-        amount1 = self._adjust_for_decimals(float(tx['amount1']), self.token1_decimals)
+        amount0 = self._adjust_for_decimals(float(tx['amount0_adjusted']), self.token0_decimals)
+        amount1 = self._adjust_for_decimals(float(tx['amount1_adjusted']), self.token1_decimals)
         
         if self.current_price is not None:
             price = Decimal(self.current_price) / (Decimal(2**96))**2
@@ -463,11 +463,11 @@ class StrategySimulator:
             try:
                 # Update position amounts with decimal adjustment
                 amount0 = self._adjust_for_decimals(
-                    abs(float(tx['amount0'])) if not pd.isna(tx['amount0']) else 0,
+                    abs(float(tx['amount0_adjusted'])) if not pd.isna(tx['amount0_adjusted']) else 0,
                     self.token0_decimals
                 )
                 amount1 = self._adjust_for_decimals(
-                    abs(float(tx['amount1'])) if not pd.isna(tx['amount1']) else 0,
+                    abs(float(tx['amount1_adjusted'])) if not pd.isna(tx['amount1_adjusted']) else 0,
                     self.token1_decimals
                 )
                 
@@ -488,7 +488,7 @@ class StrategySimulator:
                 
             except Exception as e:
                 logger.error(f"Error processing {tx_type} transaction: {e}")
-                return {}
+                return {'wealth': float(self.wealth)}  # Return current wealth even on error
         
         # Check if rebalancing is needed
         current_bucket = self._get_current_bucket()
