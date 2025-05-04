@@ -88,11 +88,31 @@ class FeatureEngine:
         return (is_swap) & (price_changes <= self.price_impact_threshold)
         
     def process_chunk(self, df_chunk: pd.DataFrame) -> pd.DataFrame:
-        """Process a chunk of data for parallel computation."""
+        """Process a chunk of data to compute features."""
+        # Clean up data first
+        df_chunk = df_chunk.replace('', np.nan)  # Replace empty strings with NaN
+        
+        # Strip whitespace only for string columns
+        string_cols = df_chunk.select_dtypes(include=['object']).columns
+        for col in string_cols:
+            df_chunk[col] = df_chunk[col].str.strip()
+        
+        # Convert numeric columns
+        numeric_cols = ['amount0', 'amount1', 'total_liquidity', 'total_liquidity_delta', 
+                       'current_tick', 'tick_lower', 'tick_upper', 'liquidity']
+        for col in numeric_cols:
+            if col in df_chunk.columns:
+                df_chunk[col] = pd.to_numeric(df_chunk[col], errors='coerce')
+        
+        # Compute volumes using coalesced amounts
+        amount0 = df_chunk['amount0'].fillna(0).astype(float)
+        amount1 = df_chunk['amount1'].fillna(0).astype(float)
+        volumes = np.maximum(np.abs(amount0), np.abs(amount1))
+        
+        # Rest of processing
         is_valid_swap = self.is_non_arbitrage_swap(df_chunk)
         
         # Normalize amounts by token decimals
-        volumes = np.abs(df_chunk['amount0'].astype(float).fillna(0).values)
         volumes = np.array([self._normalize_amount(x, True) for x in volumes])
         volumes[~is_valid_swap] = 0
         
