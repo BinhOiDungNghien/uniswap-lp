@@ -290,7 +290,19 @@ class StrategySimulator:
             if float(tx['amount0_adjusted']) < 0:  # Swap token0 -> token1
                 fee_amount = amount0 * Decimal(self.fee_tier) / Decimal(1_000_000)
             else:  # Swap token1 -> token0
-                price_dec = self._validate_sqrt_price(tx['sqrtPriceX96'])
+                # Try both camelCase and lowercase versions of the column name
+                sqrt_price = None
+                for col_name in ['sqrtPriceX96', 'sqrtpricex96']:
+                    if col_name in tx:
+                        sqrt_price = tx[col_name]
+                        break
+                
+                if sqrt_price is None:
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("sqrt price column not found, returning 0")
+                    return Decimal(0)
+                
+                price_dec = self._validate_sqrt_price(sqrt_price)
                 if price_dec is None:
                     if logger.isEnabledFor(logging.DEBUG):
                         logger.debug("Invalid price for fee calculation, returning 0")
@@ -424,9 +436,15 @@ class StrategySimulator:
         
         self.current_tx = tx
         
-        # Update current price if available
-        if 'sqrtPriceX96' in tx and not pd.isna(tx['sqrtPriceX96']):
-            price_dec = self._validate_sqrt_price(tx['sqrtPriceX96'])
+        # Update current price if available - try both camelCase and lowercase versions
+        sqrt_price = None
+        for col_name in ['sqrtPriceX96', 'sqrtpricex96']:
+            if col_name in tx and not pd.isna(tx[col_name]):
+                sqrt_price = tx[col_name]
+                break
+                
+        if sqrt_price is not None:
+            price_dec = self._validate_sqrt_price(sqrt_price)
             if price_dec is not None:
                 self.current_price = price_dec
                 if logger.isEnabledFor(logging.DEBUG):
