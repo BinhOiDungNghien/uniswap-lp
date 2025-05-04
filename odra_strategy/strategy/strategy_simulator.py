@@ -4,14 +4,16 @@ Strategy Simulator for ODRA
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, Optional, List, Tuple
+from decimal import Decimal, InvalidOperation
+from typing import Dict, Any, Optional, List, Tuple, Union
 import uuid
 import logging
 from .tick_math import (
     tick_to_sqrt_price_x96,
     sqrt_price_x96_to_tick,
     get_liquidity_for_amounts,
-    get_amounts_for_liquidity
+    get_amounts_for_liquidity,
+    calculate_fee_growth_inside
 )
 from ..utils.logging_utils import log_simulation_step, plot_price_ranges
 
@@ -23,16 +25,17 @@ class Position:
                  position_id: str,
                  tick_lower: int,
                  tick_upper: int,
-                 liquidity: float,
-                 amount0: float,
-                 amount1: float):
+                 liquidity: Decimal,
+                 amount0: Decimal,
+                 amount1: Decimal):
         self.position_id = position_id
         self.tick_lower = tick_lower
         self.tick_upper = tick_upper
         self.liquidity = liquidity
         self.amount0 = amount0
         self.amount1 = amount1
-        self.fees_earned = 0.0
+        self.fees_earned = Decimal(0)
+        self.fee_growth_inside_last = Decimal(0)
         
     def to_dict(self) -> Dict[str, Any]:
         """Convert position to dictionary representation."""
@@ -40,10 +43,10 @@ class Position:
             'position_id': self.position_id,
             'tick_lower': self.tick_lower,
             'tick_upper': self.tick_upper,
-            'liquidity': self.liquidity,
-            'amount0': self.amount0,
-            'amount1': self.amount1,
-            'fees_earned': self.fees_earned
+            'liquidity': float(self.liquidity),
+            'amount0': float(self.amount0),
+            'amount1': float(self.amount1),
+            'fees_earned': float(self.fees_earned)
         }
         
     @classmethod
@@ -53,11 +56,11 @@ class Position:
             position_id=data['position_id'],
             tick_lower=data['tick_lower'],
             tick_upper=data['tick_upper'],
-            liquidity=data['liquidity'],
-            amount0=data['amount0'],
-            amount1=data['amount1']
+            liquidity=Decimal(data['liquidity']),
+            amount0=Decimal(data['amount0']),
+            amount1=Decimal(data['amount1'])
         )
-        position.fees_earned = data.get('fees_earned', 0.0)
+        position.fees_earned = Decimal(data.get('fees_earned', 0))
         return position
 
 class StrategySimulator:
@@ -81,9 +84,13 @@ class StrategySimulator:
         self.config = config
         self.tau = config['tau']
         self.tick_spacing = config['tick_spacing']
-        self.initial_wealth = config.get('initial_wealth', 1.0)
-        self.min_position_size = config.get('min_position_size', 0.1)
+        self.initial_wealth = Decimal(config.get('initial_wealth', 1.0))
+        self.min_position_size = Decimal(config.get('min_position_size', 0.1))
         self.fee_tier = config.get('fee_tier', 3000)
+        
+        # Token decimals
+        self.token0_decimals = config.get('token0_decimals', 18)
+        self.token1_decimals = config.get('token1_decimals', 18)
         
         # State variables
         self.wealth = self.initial_wealth
@@ -91,10 +98,17 @@ class StrategySimulator:
         self.current_price = None
         self.current_tx = None
         self.last_center_bucket = None
-        self.fees_collected = 0.0
+        self.fees_collected = Decimal(0)
+        
+        # Fee growth tracking
+        self.fee_growth_global = Decimal(0)
         
         # Setup logging
         self.logger = logging.getLogger(__name__)
+
+    def _adjust_for_decimals(self, amount: float, token_decimals: int) -> Decimal:
+        """Adjust token amount for decimals."""
+        return Decimal(amount) * Decimal(10) ** -token_decimals
 
     def _get_current_bucket(self) -> int:
         """Get current bucket based on current price or tick."""
@@ -199,6 +213,9 @@ class StrategySimulator:
         positions = {}
         current_tick = self._get_current_bucket() * self.tick_spacing
         
+        # Convert weights to Decimal
+        weights = [Decimal(str(w)) for w in weights]  # Use str() for exact conversion
+        
         if len(weights) == 2:  # Simple in/out pool allocation
             if weights[0] > 0:  # In-pool position
                 tick_lower = current_tick - self.tick_spacing
@@ -210,7 +227,7 @@ class StrategySimulator:
                 )
                 positions[position.position_id] = position
                 
-            if weights[1] > 0:  # Out-pool position (represented as very wide range)
+            if weights[1] > 0:  # Out-pool position
                 tick_lower = current_tick - 100 * self.tick_spacing
                 tick_upper = current_tick + 100 * self.tick_spacing
                 position = self._create_position(
@@ -235,37 +252,81 @@ class StrategySimulator:
                     
         return positions
 
-    def _calculate_swap_fees(self, tx: pd.Series) -> float:
-        """Calculate fees earned from a swap transaction."""
-        volume = abs(float(tx['amount0'])) + abs(float(tx['amount1']))
-        fee_rate = self.fee_tier / 1_000_000
+    def _validate_sqrt_price(self, price_val: Union[float, str]) -> Optional[Decimal]:
+        """
+        Validate and convert sqrtPriceX96 to Decimal.
         
-        # Calculate fees per position based on liquidity contribution
-        total_fees = 0.0
-        
-        # Check for tick information
-        tick_col = None
-        for col_name in ['tick', 'current_tick']:
-            if col_name in tx:
-                tick_col = col_name
-                break
-                
-        if tick_col is not None:
-            current_tick = tx[tick_col]
-            total_liquidity = sum(
-                pos.liquidity 
-                for pos in self.current_positions.values()
-                if pos.tick_lower <= current_tick <= pos.tick_upper
-            )
+        Args:
+            price_val: The price value to validate
             
-            if total_liquidity > 0:
-                for position in self.current_positions.values():
-                    if position.tick_lower <= current_tick <= position.tick_upper:
-                        position_fee = volume * fee_rate * (position.liquidity / total_liquidity)
-                        position.fees_earned += position_fee
-                        total_fees += position_fee
-                        
-        return total_fees
+        Returns:
+            Optional[Decimal]: Valid Decimal price or None if invalid
+        """
+        try:
+            # Convert to string first for exact decimal conversion
+            price_str = str(float(price_val))
+            price_dec = Decimal(price_str)
+            
+            # Check for valid price (must be positive)
+            if price_dec <= 0:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"Invalid price value (<=0): {price_dec}")
+                return None
+            
+            return price_dec
+        except (ValueError, TypeError, InvalidOperation) as e:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Error converting price {price_val} to Decimal: {e}")
+            return None
+
+    def _calculate_swap_fees(self, tx: pd.Series) -> Decimal:
+        """Calculate fees from swap following Uniswap V3 formula."""
+        try:
+            # Adjust amounts for decimals
+            amount0 = self._adjust_for_decimals(abs(float(tx['amount0'])), self.token0_decimals)
+            amount1 = self._adjust_for_decimals(abs(float(tx['amount1'])), self.token1_decimals)
+            
+            # Calculate fee based on token being swapped in
+            if float(tx['amount0']) < 0:  # Swap token0 -> token1
+                fee_amount = amount0 * Decimal(self.fee_tier) / Decimal(1_000_000)
+            else:  # Swap token1 -> token0
+                price_dec = self._validate_sqrt_price(tx['sqrtPriceX96'])
+                if price_dec is None:
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("Invalid price for fee calculation, returning 0")
+                    return Decimal(0)
+                
+                current_price = price_dec / (Decimal(2**96))**2
+                fee_amount = amount1 * current_price * Decimal(self.fee_tier) / Decimal(1_000_000)
+            
+            # Update fee growth global
+            if 'total_liquidity' in tx and not pd.isna(tx['total_liquidity']):
+                try:
+                    total_liquidity = Decimal(str(float(tx['total_liquidity'])))
+                    if total_liquidity > 0:
+                        self.fee_growth_global += fee_amount / total_liquidity
+                    elif logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(f"Invalid total_liquidity (<=0): {total_liquidity}")
+                except (ValueError, TypeError, InvalidOperation) as e:
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(f"Error updating fee growth global: {e}")
+            
+            return fee_amount
+        
+        except Exception as e:
+            logger.error(f"Error calculating swap fees: {e}")
+            return Decimal(0)
+
+    def process_collect(self, tx: pd.Series) -> Decimal:
+        """Process COLLECT transaction and return value in terms of wealth."""
+        amount0 = self._adjust_for_decimals(float(tx['amount0']), self.token0_decimals)
+        amount1 = self._adjust_for_decimals(float(tx['amount1']), self.token1_decimals)
+        
+        if self.current_price is not None:
+            price = Decimal(self.current_price) / (Decimal(2**96))**2
+            value = amount0 + (amount1 * price)
+            return value
+        return Decimal(0)
 
     def compute_bucket_range(self, center_bucket: int) -> Tuple[int, int]:
         """
@@ -358,16 +419,23 @@ class StrategySimulator:
         Returns:
             Dictionary containing step results
         """
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Processing transaction: {tx.to_dict()}")
+        
         self.current_tx = tx
         
         # Update current price if available
         if 'sqrtPriceX96' in tx and not pd.isna(tx['sqrtPriceX96']):
-            try:
-                self.current_price = float(tx['sqrtPriceX96'])
-            except (ValueError, TypeError):
-                logger.warning(f"Could not convert sqrtPriceX96 {tx['sqrtPriceX96']} to float")
+            price_dec = self._validate_sqrt_price(tx['sqrtPriceX96'])
+            if price_dec is not None:
+                self.current_price = price_dec
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"Updated price to: {self.current_price}")
+            else:
                 self.current_price = None
-            
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Could not validate price, setting to None")
+        
         # Process transaction - handle different column names for transaction type
         tx_type = None
         for col_name in ['tx_type', 'type', 'transaction_type']:
@@ -376,7 +444,8 @@ class StrategySimulator:
                 break
                 
         if tx_type is None:
-            logger.warning("Transaction type column not found. Using default 'SWAP'.")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Transaction type column not found. Using default 'SWAP'.")
             tx_type = 'SWAP'
             
         # Process transaction based on type
@@ -386,12 +455,41 @@ class StrategySimulator:
             self.fees_collected += fees
             self.wealth += fees
             
-        elif tx_type in ['MINT', 'BURN']:
-            # Update position amounts
-            amount0 = abs(float(tx['amount0'])) if not pd.isna(tx['amount0']) else 0
-            amount1 = abs(float(tx['amount1'])) if not pd.isna(tx['amount1']) else 0
-            self.wealth += (amount0 + amount1) / 2
+        elif tx_type == 'COLLECT':
+            collected_value = self.process_collect(tx)
+            self.wealth += collected_value
             
+        elif tx_type in ['MINT', 'BURN']:
+            try:
+                # Update position amounts with decimal adjustment
+                amount0 = self._adjust_for_decimals(
+                    abs(float(tx['amount0'])) if not pd.isna(tx['amount0']) else 0,
+                    self.token0_decimals
+                )
+                amount1 = self._adjust_for_decimals(
+                    abs(float(tx['amount1'])) if not pd.isna(tx['amount1']) else 0,
+                    self.token1_decimals
+                )
+                
+                # Calculate value based on current price
+                if self.current_price is not None:
+                    price_scale = self.current_price / (Decimal(2**96))**2
+                    position_value = amount0 + (amount1 * price_scale)
+                else:
+                    # Fallback: use simple sum if price not available
+                    position_value = amount0 + amount1
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("No valid price available, using simple sum for position value")
+                
+                if tx_type == 'MINT':
+                    self.wealth -= position_value
+                else:  # BURN
+                    self.wealth += position_value
+                
+            except Exception as e:
+                logger.error(f"Error processing {tx_type} transaction: {e}")
+                return {}
+        
         # Check if rebalancing is needed
         current_bucket = self._get_current_bucket()
         if self.needs_rebalance(current_bucket):
@@ -402,8 +500,8 @@ class StrategySimulator:
                 
         # Return step results
         return {
-            'wealth': self.wealth,
-            'fees_collected': self.fees_collected,
+            'wealth': float(self.wealth),
+            'fees_collected': float(self.fees_collected),
             'active_positions': len(self.current_positions),
             'current_bucket': current_bucket
         }

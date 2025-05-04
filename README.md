@@ -111,7 +111,7 @@ If you use this code in your research, please cite:
   title = {ODRA: Optimal Dynamic Reset Allocation for Uniswap v3},
   year = {2024},
   publisher = {GitHub},
-  url = {https://github.com/YOUR_USERNAME/uniswap-lp}
+  url = {https://github.com/BinhOiDungNghien/uniswap-lp}
 }
 ```
 

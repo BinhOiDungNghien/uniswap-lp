@@ -18,14 +18,46 @@ class DataLoader:
         """Initialize DataLoader.
         
         Args:
-            config: Configuration dictionary containing data paths and parameters
+            config: Configuration dictionary containing:
+                - raw_path: Path to raw data directory
+                - processed_path: Path to save processed data
+                - episode_length: Length of each episode
+                - token0_decimals: Decimals for token0
+                - token1_decimals: Decimals for token1
         """
         self.raw_path = config['raw_path']
         self.processed_path = config['processed_path']
         self.episode_length = config['episode_length']
         
+        # Token decimals (default to 18 for most ERC20 tokens)
+        self.token0_decimals = config.get('token0_decimals', 18)
+        self.token1_decimals = config.get('token1_decimals', 18)
+        
         # Create processed directory if not exists
         os.makedirs(os.path.dirname(self.processed_path), exist_ok=True)
+        
+    def calculate_price(self, sqrt_price_x96: np.ndarray) -> np.ndarray:
+        """Calculate real token price from sqrtPriceX96.
+        
+        The price is calculated as:
+        price = (sqrtPriceX96/2^96)^2 * (10^decimal1)/(10^decimal0)
+        
+        Args:
+            sqrt_price_x96: Array of sqrtPriceX96 values
+            
+        Returns:
+            Array of real token prices
+        """
+        # Convert to float64 for precision
+        sqrt_price = sqrt_price_x96.astype(np.float64)
+        
+        # Calculate base price (sqrtPriceX96/2^96)^2
+        base_price = np.square(sqrt_price / (2**96))
+        
+        # Adjust for token decimals
+        decimal_adjustment = 10**(self.token1_decimals - self.token0_decimals)
+        
+        return base_price * decimal_adjustment
         
     def load_raw_data(self) -> pd.DataFrame:
         """Load and combine all CSV files from raw directory.
@@ -80,9 +112,13 @@ class DataLoader:
         # Convert sqrtPriceX96 to numeric carefully
         df['sqrtPriceX96'] = pd.to_numeric(df['sqrtPriceX96'], errors='coerce')
         
-        # Calculate price using numpy to handle large numbers
+        # Calculate price using decimal-adjusted formula
         sqrt_price = df['sqrtPriceX96'].to_numpy(dtype=np.float64)
-        df['price'] = np.square(sqrt_price / (2**96))
+        df['price'] = self.calculate_price(sqrt_price)
+        
+        # Add price in both directions for convenience
+        df['price0_1'] = df['price']  # Price of token0 in terms of token1
+        df['price1_0'] = 1 / df['price']  # Price of token1 in terms of token0
         
         # Process different transaction types
         df_processed = pd.DataFrame()
@@ -90,20 +126,37 @@ class DataLoader:
         # For SWAP transactions
         swaps = df[df['tx_type'] == 'SWAP'].copy()
         if not swaps.empty:
-            df_processed = swaps[['block_timestamp', 'tx_type', 'amount0', 'amount1', 
-                                'sqrtPriceX96', 'current_tick', 'price']]
+            # Adjust amounts for decimals
+            swaps['amount0_adjusted'] = swaps['amount0'] / (10**self.token0_decimals)
+            swaps['amount1_adjusted'] = swaps['amount1'] / (10**self.token1_decimals)
+            
+            df_processed = swaps[['block_timestamp', 'tx_type', 
+                                'amount0_adjusted', 'amount1_adjusted',
+                                'sqrtPriceX96', 'current_tick', 
+                                'price0_1', 'price1_0']]
                                 
         # Add MINT/BURN/COLLECT info
         for tx_type in ['MINT', 'BURN', 'COLLECT']:
             type_df = df[df['tx_type'] == tx_type].copy()
             if not type_df.empty:
-                type_df = type_df[['block_timestamp', 'tx_type', 'amount0', 'amount1',
-                                 'liquidity', 'position_id', 'tick_lower', 'tick_upper']]
+                # Adjust amounts for decimals
+                type_df['amount0_adjusted'] = type_df['amount0'] / (10**self.token0_decimals)
+                type_df['amount1_adjusted'] = type_df['amount1'] / (10**self.token1_decimals)
+                
+                type_df = type_df[['block_timestamp', 'tx_type', 
+                                 'amount0_adjusted', 'amount1_adjusted',
+                                 'liquidity', 'position_id', 
+                                 'tick_lower', 'tick_upper']]
                 df_processed = pd.concat([df_processed, type_df], ignore_index=True)
         
         # Sort by timestamp
         df_processed = df_processed.sort_values('block_timestamp')
         
+        # Validate prices
+        if (df_processed['price0_1'] <= 0).any():
+            raise ValueError("Found non-positive prices after conversion")
+            
+        logger.info(f"Processed {len(df_processed):,} transactions with decimal adjustment")
         return df_processed
         
     def save_processed_data(self, df: pd.DataFrame):
