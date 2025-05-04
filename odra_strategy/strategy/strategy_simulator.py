@@ -282,49 +282,73 @@ class StrategySimulator:
     def _calculate_swap_fees(self, tx: pd.Series) -> Decimal:
         """Calculate fees from swap following Uniswap V3 formula."""
         try:
-            # Adjust amounts for decimals
+            # Validate required fields
+            if 'amount0_adjusted' not in tx or 'amount1_adjusted' not in tx:
+                logger.warning("Missing required amount fields in swap transaction")
+                return Decimal(0)
+
+            # Get adjusted amounts
             amount0 = self._adjust_for_decimals(abs(float(tx['amount0_adjusted'])), self.token0_decimals)
             amount1 = self._adjust_for_decimals(abs(float(tx['amount1_adjusted'])), self.token1_decimals)
-            
-            # Calculate fee based on token being swapped in
-            if float(tx['amount0_adjusted']) < 0:  # Swap token0 -> token1
+
+            # Determine swap direction and calculate fees
+            amount0_raw = float(tx['amount0_adjusted'])
+            fee_amount = Decimal(0)
+
+            if amount0_raw < 0:  # Token0 -> Token1 swap
+                # For token0 -> token1, we can directly use amount0
                 fee_amount = amount0 * Decimal(self.fee_tier) / Decimal(1_000_000)
-            else:  # Swap token1 -> token0
-                # Try both camelCase and lowercase versions of the column name
-                sqrt_price = None
-                for col_name in ['sqrtPriceX96', 'sqrtpricex96']:
-                    if col_name in tx and not pd.isna(tx[col_name]):
-                        sqrt_price = tx[col_name]
-                        break
-                
-                # If no valid sqrt price, use amount0 for fee calculation
-                if sqrt_price is None:
-                    fee_amount = amount0 * Decimal(self.fee_tier) / Decimal(1_000_000)
+                logger.debug(f"Token0->Token1 swap fee: {fee_amount}")
+            else:  # Token1 -> Token0 swap
+                # Try to get price for more accurate fee calculation
+                price_available = False
+                current_price = None
+
+                # Check for price in transaction
+                for price_col in ['sqrtPriceX96', 'sqrtpricex96', 'price']:
+                    if price_col in tx and not pd.isna(tx[price_col]):
+                        try:
+                            price_val = self._validate_sqrt_price(tx[price_col])
+                            if price_val is not None:
+                                current_price = price_val / (Decimal(2**96))**2
+                                price_available = True
+                                break
+                        except Exception as e:
+                            logger.debug(f"Failed to process price from {price_col}: {e}")
+
+                # If no valid price in transaction, try using simulator's current price
+                if not price_available and self.current_price is not None:
+                    try:
+                        current_price = self.current_price / (Decimal(2**96))**2
+                        price_available = True
+                    except Exception as e:
+                        logger.debug(f"Failed to use simulator current price: {e}")
+
+                # Calculate fee based on available data
+                if price_available and current_price is not None:
+                    # Use price-adjusted amount1
+                    fee_amount = amount1 * current_price * Decimal(self.fee_tier) / Decimal(1_000_000)
+                    logger.debug(f"Token1->Token0 swap fee (price-based): {fee_amount}")
                 else:
-                    price_dec = self._validate_sqrt_price(sqrt_price)
-                    if price_dec is None:
-                        # Fallback to amount0-based fee if price is invalid
-                        fee_amount = amount0 * Decimal(self.fee_tier) / Decimal(1_000_000)
-                    else:
-                        current_price = price_dec / (Decimal(2**96))**2
-                        fee_amount = amount1 * current_price * Decimal(self.fee_tier) / Decimal(1_000_000)
-            
-            # Update fee growth global if total liquidity is available
+                    # Fallback: use amount0 directly
+                    fee_amount = amount0 * Decimal(self.fee_tier) / Decimal(1_000_000)
+                    logger.debug(f"Token1->Token0 swap fee (fallback): {fee_amount}")
+
+            # Update fee growth global if possible
             if 'total_liquidity' in tx and not pd.isna(tx['total_liquidity']):
                 try:
                     total_liquidity = Decimal(str(float(tx['total_liquidity'])))
                     if total_liquidity > 0:
                         self.fee_growth_global += fee_amount / total_liquidity
-                    elif logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(f"Invalid total_liquidity (<=0): {total_liquidity}")
-                except (ValueError, TypeError, InvalidOperation) as e:
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(f"Error updating fee growth global: {e}")
-            
+                        logger.debug(f"Updated fee growth global: {self.fee_growth_global}")
+                except Exception as e:
+                    logger.debug(f"Failed to update fee growth global: {e}")
+
             return fee_amount
-        
+
         except Exception as e:
-            logger.error(f"Error calculating swap fees: {e}")
+            logger.error(f"Error calculating swap fees: {str(e)}")
+            # Return 0 fees on error rather than crashing
             return Decimal(0)
 
     def process_collect(self, tx: pd.Series) -> Decimal:
