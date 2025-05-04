@@ -122,11 +122,13 @@ class FeatureEngine:
         volumes[~is_valid_swap] = 0
         
         # Compute EWMA for chunk
-        ewma = np.zeros_like(volumes)
+        ewma = np.zeros(len(volumes))
         if len(volumes) > 0:
-            ewma[0] = volumes[0]
+            # Convert volumes to numpy array if it's a Series
+            volumes_array = volumes.values if isinstance(volumes, pd.Series) else volumes
+            ewma[0] = volumes_array[0]
             for i in range(1, len(volumes)):
-                ewma[i] = self.alpha * volumes[i] + (1 - self.alpha) * ewma[i-1]
+                ewma[i] = self.alpha * volumes_array[i] + (1 - self.alpha) * ewma[i-1]
                 
         # Compute center bucket and prices from ticks
         ticks = df_chunk['current_tick'].astype(float).fillna(0).values
