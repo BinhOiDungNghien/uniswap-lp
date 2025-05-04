@@ -21,7 +21,6 @@ wheels/
 *.egg
 
 # Raw data files
-odra_strategy/data/raw/*.csv
 odra_strategy/data/processed/*.pkl
 
 # IDE
@@ -29,6 +28,7 @@ odra_strategy/data/processed/*.pkl
 .vscode/
 *.swp
 *.swo
+.cursor/rules/
 
 # Jupyter Notebook
 .ipynb_checkpoints
