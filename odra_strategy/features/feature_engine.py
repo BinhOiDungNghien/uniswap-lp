@@ -97,23 +97,28 @@ class FeatureEngine:
         for col in string_cols:
             df_chunk[col] = df_chunk[col].str.strip()
         
-        # Convert numeric columns
-        numeric_cols = ['amount0', 'amount1', 'total_liquidity', 'total_liquidity_delta', 
+        # Convert numeric columns, create if missing
+        numeric_cols = ['amount0_adjusted', 'amount1_adjusted', 'total_liquidity', 'total_liquidity_delta', 
                        'current_tick', 'tick_lower', 'tick_upper', 'liquidity']
         for col in numeric_cols:
-            if col in df_chunk.columns:
-                df_chunk[col] = pd.to_numeric(df_chunk[col], errors='coerce')
+            if col not in df_chunk.columns:
+                logger.warning(f"Column {col} not found in data. Creating with NaN values.")
+                df_chunk[col] = np.nan
+            df_chunk[col] = pd.to_numeric(df_chunk[col], errors='coerce')
+        
+        # Log column names for debugging
+        logger.info(f"Available columns: {', '.join(df_chunk.columns)}")
+        logger.info(f"First few rows of amount0_adjusted: {df_chunk['amount0_adjusted'].head()}")
         
         # Compute volumes using coalesced amounts
-        amount0 = df_chunk['amount0'].fillna(0).astype(float)
-        amount1 = df_chunk['amount1'].fillna(0).astype(float)
+        amount0 = df_chunk['amount0_adjusted'].fillna(0).astype(float)
+        amount1 = df_chunk['amount1_adjusted'].fillna(0).astype(float)
         volumes = np.maximum(np.abs(amount0), np.abs(amount1))
         
         # Rest of processing
         is_valid_swap = self.is_non_arbitrage_swap(df_chunk)
         
-        # Normalize amounts by token decimals
-        volumes = np.array([self._normalize_amount(x, True) for x in volumes])
+        # Volumes are already normalized by token decimals in DataLoader
         volumes[~is_valid_swap] = 0
         
         # Compute EWMA for chunk
@@ -134,11 +139,9 @@ class FeatureEngine:
         for i in range(len(df_chunk)):
             tx = df_chunk.iloc[i]
             if tx['tx_type'] in ['MINT', 'BURN', 'COLLECT']:
-                amount0 = abs(float(tx['amount0'])) if not pd.isna(tx['amount0']) else 0
-                amount1 = abs(float(tx['amount1'])) if not pd.isna(tx['amount1']) else 0
-                # Normalize amounts by their respective decimals
-                amount0 = self._normalize_amount(amount0, True)
-                amount1 = self._normalize_amount(amount1, False)
+                amount0 = abs(float(tx['amount0_adjusted'])) if not pd.isna(tx['amount0_adjusted']) else 0
+                amount1 = abs(float(tx['amount1_adjusted'])) if not pd.isna(tx['amount1_adjusted']) else 0
+                # Amounts are already normalized by decimals
                 cumulative_wealth += (amount0 + amount1) / 2
             wealth[i] = cumulative_wealth
             
@@ -153,9 +156,25 @@ class FeatureEngine:
         """Compute all features for ODRA strategy using parallel processing."""
         logger.info(f"Computing features using {self.n_jobs} parallel jobs...")
         
+        # Validate and preprocess input data
+        logger.info(f"Input DataFrame shape: {df.shape}")
+        logger.info(f"Input columns: {', '.join(df.columns)}")
+        
+        # Check if column names need cleaning
+        df.columns = df.columns.str.strip().str.lower()
+        logger.info(f"Cleaned columns: {', '.join(df.columns)}")
+        
+        # Ensure required columns exist
+        required_cols = ['amount0_adjusted', 'amount1_adjusted', 'tx_type', 'current_tick']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {', '.join(missing_cols)}")
+        
         # Split data into chunks for parallel processing
         chunk_size = max(1, len(df) // (self.n_jobs * 4))
         chunks = [df[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
+        
+        logger.info(f"Split data into {len(chunks)} chunks of size {chunk_size}")
         
         # Process chunks in parallel
         with mp.Pool(self.n_jobs) as pool:
@@ -172,7 +191,7 @@ class FeatureEngine:
         features['t_T'] = np.linspace(0, 1, len(features))
         
         # Define column types
-        numeric_cols = ['amount0', 'amount1', 'sqrtPriceX96', 'current_tick',
+        numeric_cols = ['amount0_adjusted', 'amount1_adjusted', 'sqrtPriceX96', 'current_tick',
                        'liquidity', 'tick_lower', 'tick_upper']
         categorical_cols = ['tx_type', 'position_id']
         computed_cols = ['ewma_volume', 'center_bucket', 'wealth', 'price', 't_T']
